@@ -419,8 +419,8 @@ FodyWeavers.xsd
 *.msp
 
 # Ignore test and tmp files
-*/tmp
-*/testbench
+tmp
+core
+testbench
+.vscode
 .DS_Store
-scrutinize.ipynb
-get_deterministic_climatology
