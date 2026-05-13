@@ -9,10 +9,10 @@ from PIL import Image
 from io import BytesIO
 from urllib.parse import urljoin
 from pathlib import Path
+from scipy.ndimage import distance_transform_edt
 import json
 import os
 import hashlib
-import gc
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
@@ -427,7 +427,7 @@ class RegionalTileServer:
         nearest_rev = idx_rev - choose_left.astype(np.int64)
         return (coord.size - 1) - nearest_rev
 
-    def get_tile_data(self, values_2d, src_lon, src_lat, tile_lon, tile_lat):
+    def get_tile_data(self, values_2d, src_lon, src_lat, tile_lon, tile_lat, search_radius=1):
         """
         Sample a 2D source grid to the tile grid with nearest-neighbor lookup.
 
@@ -478,6 +478,51 @@ class RegionalTileServer:
             sampled_flat[in_bounds] = sampled_vals.astype(np.float32, copy=False)
 
         return sampled_flat.reshape(tile_lon.shape)
+
+
+        # if np.any(in_bounds):
+        #     filled_values, dist_to_valid = fill_nan_with_nearest_valid(values_2d)
+
+        #     lon_idx = self._nearest_indices_1d(src_lon, tile_lon_flat[in_bounds])
+        #     lat_idx = self._nearest_indices_1d(src_lat, tile_lat_flat[in_bounds])
+
+        #     sampled_vals = filled_values[lat_idx, lon_idx]
+        #     sampled_dist = dist_to_valid[lat_idx, lon_idx]
+
+        #     # keep only pixels close to a real river cell
+        #     sampled_vals[sampled_dist > 1.5] = np.nan
+
+            # nan_mask = ~np.isfinite(sampled_vals)
+            # if np.any(nan_mask) and search_radius > 0:
+            #     bad_pos = np.where(nan_mask)[0]
+
+            #     for p in bad_pos:
+            #         i = lat_idx[p]
+            #         j = lon_idx[p]
+
+            #         i0 = max(0, i - search_radius)
+            #         i1 = min(values_2d.shape[0], i + search_radius + 1)
+            #         j0 = max(0, j - search_radius)
+            #         j1 = min(values_2d.shape[1], j + search_radius + 1)
+
+            #         window = values_2d[i0:i1, j0:j1]
+            #         valid = np.isfinite(window)
+
+            #         if np.any(valid):
+            #             wi, wj = np.where(valid)
+            #             abs_i = i0 + wi
+            #             abs_j = j0 + wj
+
+            #             di = abs_i - i
+            #             dj = abs_j - j
+            #             d2 = di * di + dj * dj
+            #             k = np.argmin(d2)
+
+            #             sampled_vals[p] = values_2d[abs_i[k], abs_j[k]]
+
+        #     sampled_flat[in_bounds] = sampled_vals #.astype(np.float32, copy=False)
+
+        # return sampled_flat.reshape(tile_lon.shape)
     
     def create_colormap_image(self, data, colormap_name, vmin, vmax):
         """Create RGBA image from data"""
@@ -546,6 +591,163 @@ class RegionalTileServer:
         # print(f"  Converted to palette mode with transparency index")
 
         return img_p
+    
+    # def thicken_sparse_features(self, tile_data, passes=1):
+    #     """
+    #     Expand sparse valid pixels into immediate neighbors.
+    #     Useful for line-like fields (e.g., streamflow) that can look like
+    #     they disappear at high zoom due to sub-pixel width.
+    #     """
+    #     data = np.asarray(tile_data, dtype=np.float32)
+    #     out = data.copy()
+
+    #     for _ in range(max(1, int(passes))):
+    #         base = out.copy()
+    #         nan_mask = np.isnan(out)
+    #         if not np.any(nan_mask):
+    #             break
+
+    #         for dy in (-1, 0, 1):
+    #             for dx in (-1, 0, 1):
+    #                 if dy == 0 and dx == 0:
+    #                     continue
+
+    #                 dst_y0 = max(0, dy)
+    #                 dst_y1 = min(out.shape[0], out.shape[0] + dy)
+    #                 dst_x0 = max(0, dx)
+    #                 dst_x1 = min(out.shape[1], out.shape[1] + dx)
+
+    #                 src_y0 = max(0, -dy)
+    #                 src_y1 = min(base.shape[0], base.shape[0] - dy)
+    #                 src_x0 = max(0, -dx)
+    #                 src_x1 = min(base.shape[1], base.shape[1] - dx)
+
+    #                 src = base[src_y0:src_y1, src_x0:src_x1]
+    #                 dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
+    #                 dst_nan = np.isnan(dst)
+    #                 src_valid = np.isfinite(src)
+    #                 fill = dst_nan & src_valid
+    #                 if np.any(fill):
+    #                     dst[fill] = src[fill]
+
+    #         return out
+
+# def fill_nan_with_nearest_valid(values_2d):
+#     valid = np.isfinite(values_2d)
+
+#     if not np.any(valid):
+#         return values_2d.copy(), np.full(values_2d.shape, np.inf, dtype=np.float32)
+
+#     # indices of nearest valid cell for every location
+#     dist, inds = distance_transform_edt(~valid, return_indices=True)
+
+#     filled = values_2d[inds[0], inds[1]]
+#     return filled.astype(np.float32, copy=False), dist.astype(np.float32, copy=False)
+
+    def rasterize_sparse_cells_to_tile(self, values_2d, src_lon, src_lat, tile_lon, tile_lat):
+        """
+        Rasterize valid native source cells directly into tile pixels.
+        Good for sparse line-like fields such as streamflow.
+        """
+        if values_2d.ndim != 2:
+            raise ValueError(f"values_2d must be 2D [lat,lon], got shape {values_2d.shape}")
+        if values_2d.shape != (len(src_lat), len(src_lon)):
+            raise ValueError(
+                f"values shape mismatch: values={values_2d.shape}, "
+                f"lat={len(src_lat)}, lon={len(src_lon)}"
+            )
+
+        src_lon = np.asarray(src_lon)
+        src_lat = np.asarray(src_lat)
+
+        tile_h, tile_w = tile_lon.shape
+        out = np.full((tile_h, tile_w), np.nan, dtype=np.float32)
+
+        lon_left = float(np.min(tile_lon))
+        lon_right = float(np.max(tile_lon))
+        lat_top = float(np.max(tile_lat))
+        lat_bottom = float(np.min(tile_lat))
+
+        # native spacing
+        dlon = float(np.abs(np.diff(src_lon).mean())) if len(src_lon) > 1 else 0.0
+        dlat = float(np.abs(np.diff(src_lat).mean())) if len(src_lat) > 1 else 0.0
+
+        # pad by half a native cell so edge cells are included
+        lon_mask = (src_lon >= lon_left - 0.5 * dlon) & (src_lon <= lon_right + 0.5 * dlon)
+        lat_mask = (src_lat >= lat_bottom - 0.5 * dlat) & (src_lat <= lat_top + 0.5 * dlat)
+
+        if not np.any(lon_mask) or not np.any(lat_mask):
+            return out
+
+        sub_lon = src_lon[lon_mask]
+        sub_lat = src_lat[lat_mask]
+        sub_vals = values_2d[np.ix_(lat_mask, lon_mask)]
+
+        valid = np.isfinite(sub_vals)
+        if not np.any(valid):
+            return out
+
+        lat_idx_src, lon_idx_src = np.where(valid)
+        vals = sub_vals[lat_idx_src, lon_idx_src].astype(np.float32, copy=False)
+
+        lons = sub_lon[lon_idx_src]
+        lats = sub_lat[lat_idx_src]
+
+        # map source-cell centers to tile pixel indices
+        xpix = np.round((lons - lon_left) / (lon_right - lon_left) * (tile_w - 1)).astype(int)
+        ypix = np.round((lat_top - lats) / (lat_top - lat_bottom) * (tile_h - 1)).astype(int)
+
+        good = (xpix >= 0) & (xpix < tile_w) & (ypix >= 0) & (ypix < tile_h)
+        xpix = xpix[good]
+        ypix = ypix[good]
+        vals = vals[good]
+
+        # if multiple source cells land on same pixel, keep the max
+        for xp, yp, v in zip(xpix, ypix, vals):
+            old = out[yp, xp]
+            if np.isnan(old) or v > old:
+                out[yp, xp] = v
+
+        return out
+    def thicken_sparse_features(self, tile_data, passes=1):
+        """
+        Expand sparse valid pixels into immediate neighbors.
+        Useful for line-like fields (e.g., streamflow) that can look like
+        they disappear at high zoom due to sub-pixel width.
+        """
+        data = np.asarray(tile_data, dtype=np.float32)
+        out = data.copy()
+
+        for _ in range(max(1, int(passes))):
+            base = out.copy()
+            nan_mask = np.isnan(out)
+            if not np.any(nan_mask):
+                break
+
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+
+                    dst_y0 = max(0, dy)
+                    dst_y1 = min(out.shape[0], out.shape[0] + dy)
+                    dst_x0 = max(0, dx)
+                    dst_x1 = min(out.shape[1], out.shape[1] + dx)
+
+                    src_y0 = max(0, -dy)
+                    src_y1 = min(base.shape[0], base.shape[0] - dy)
+                    src_x0 = max(0, -dx)
+                    src_x1 = min(base.shape[1], base.shape[1] - dx)
+
+                    src = base[src_y0:src_y1, src_x0:src_x1]
+                    dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
+                    dst_nan = np.isnan(dst)
+                    src_valid = np.isfinite(src)
+                    fill = dst_nan & src_valid
+                    if np.any(fill):
+                        dst[fill] = src[fill]
+
+        return out
 
 # Global server instance
 tile_server = RegionalTileServer()
@@ -604,6 +806,21 @@ def get_tile(variable, time_input, category, z, x, y):
         values_2d, src_lat, src_lon = tile_server.get_level_slice(
             variable, z_actual, time_input, category, profile
         )
+        meta = tile_server.load_pyramid_meta(variable)
+        grain = int(meta.get("grain_map", {}).get(str(z_actual), 1))
+        
+        # If request overzooms beyond available data, sample from the parent tile
+        # at z_actual so features stay visible instead of collapsing to NaN.
+        # if z > z_actual:
+        #     dz = z - z_actual
+        #     factor = 2 ** dz
+        #     x_sample = x // factor
+        #     y_sample = y // factor
+        #     z_sample = z_actual
+        # else:
+        #     x_sample = x
+        #     y_sample = y
+        #     z_sample = z
 
         # Get tile coordinate grids
         grids = tile_server.get_tile_lonlat_grids(z, x, y, TILE_SIZE, mode=mode)
@@ -623,6 +840,15 @@ def get_tile(variable, time_input, category, z, x, y):
 
         # Resample source grid to tile grid with NumPy nearest neighbor
         tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
+        is_streamflow = "streamflow" in variable.lower()
+        if is_streamflow and grain == 1:
+            #tile_data = tile_server.rasterize_sparse_cells_to_tile(values_2d, src_lon, src_lat, lon, lat)
+            tile_data = tile_server.thicken_sparse_features(tile_data, passes=1)
+        #else:
+            #tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
+
+        # if 'streamflow'in variable.lower():
+        #     tile_data = tile_server.thicken_sparse_features(tile_data, passes=1)
 
         # Debug: Check NaN percentage
         nan_pct = np.isnan(tile_data).sum() / tile_data.size * 100
