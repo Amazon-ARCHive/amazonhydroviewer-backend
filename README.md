@@ -28,21 +28,7 @@ The Amazon Hydroviewer Backend processes NASA Land Data Assimilation System (LDA
 
 ## Repository Structure
 
-```
-amazon_hydroviewer_backend/
-├── core/                                    # Core processing notebooks
-│   ├── get_ldas_base_climatology.ipynb     # Climatology baseline computation
-│   └── get_ldas_probabilistics_data.ipynb  # Probabilistic forecast generation
-├── get_ldas_probabilistics_output/          # Probabilistic forecast output
-├── get_zonal_averages_csv/                  # Processed zonal average time-series (tabulated)
-├── get_zonal_averages_climatology_csv/      # Climatology baseline data (tabulated)
-├── get_zonal_average.py                     # Zonal statistics computation script
-├── get_ldas_base_climatology.ipynb          # Climatology analysis notebook
-├── get_ldas_probabilistics_data.ipynb       # Probabilistic forecast notebook
-├── parting_raw_forecast.ipynb               # Raw forecast data processing
-├── scrutinize.ipynb                         # Data quality analysis notebook
-└── requirements.txt                         # Python dependencies
-```
+to be added soon
 
 ## Installation
 
