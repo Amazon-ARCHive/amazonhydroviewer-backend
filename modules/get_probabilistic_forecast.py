@@ -241,12 +241,17 @@ def split_forecast_and_hindcasts(
 
     return str(forecast_path), [str(p) for p in hindcasts], forecast_dt
 
-def purge_old_init(directory: Path, current_init: str):
+def purge_dirct(directory: Path):
     import shutil
+    shutil.rmtree(directory)
+
+def purge_old_init(directory: Path, current_init: str):
+    #import shutil
     for f in list(directory.glob('*')):
         if f.name.endswith(".json"):
             continue
             
         if current_init not in f.name:
-            shutil.rmtree(f)
+            #shutil.rmtree(f)
+            purge_dirct(f)
             print(f"Deleted (old init): {f}")
