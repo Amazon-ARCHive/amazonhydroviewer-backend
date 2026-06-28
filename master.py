@@ -22,7 +22,8 @@ import xarray as xr
 import regionmask
 import geopandas as gpd
 import pandas as pd
-
+import traceback
+from git import Repo
 
 # In[2]:
 
@@ -41,81 +42,79 @@ list_of_variables = {
 
 # Data directory
 surface_model_file_path = r"/mnt/vast/prakrut/backup/lis_runs/malaria_amazon/forecast/monthly" # Input location on group server
+repo = Repo(os.getcwd())
+
 
 # Find forecast and hindcast files
 try: 
     forecast_file, hindcast_files, f_dt = prob.split_forecast_and_hindcasts(surface_model_file_path)
-    print("Forecast file:", forecast_file)
+    initialization_date = f"{f_dt.year}_{f_dt.strftime('%b').lower()}" # create initialization date tag
+
+    print("Found latest forecast file:", forecast_file)
     print("Hindcasts   :", len(hindcast_files), "files")
-    print("Init date   :", f_dt)
-    # Create initialization date tag
-    initialization_date = f"{f_dt.year}_{f_dt.strftime('%b').lower()}"
     print("Forecast initialization date:", initialization_date)
 
-except Exception as e:
+    # Manage working directories/repo:
+    
+    # Create output directories
+    prob_output_dir = Path('./get_ldas_probabilistic_output')
+    prob_output_dir.mkdir(exist_ok=True, parents=True)
+
+    # Create output directories for cached .zarr files
+    prob_output_cache = prob_output_dir / 'tmp'
+    prob_output_cache.mkdir(exist_ok=True, parents=True)
+    prob.purge_old_init(prob_output_cache, current_init=initialization_date) # remove tmp files from last month
+
+    # Create output directories for subsampled forecast files
+    subsampled_output_dir = prob_output_dir / 'subsampled'
+    subsampled_output_dir.mkdir(exist_ok=True, parents=True)
+    # prob.purge_old_init(subsampled_output_dir, current_init=initialization_date)
+
+    obs_ = []
+    for f in subsampled_output_dir.glob('*'):
+        if f.name.endswith('.json'):
+            continue
+        if initialization_date not in f.name:
+            obs_.append(f)
+    if len(obs_) > 0:
+        repo.index.remove(obs_, r=True) # stage the removal in git
+
+    ###
+    ### FIND ZONAL AVG. OF FORECAST
+    ###
+
+    # Create output directories for zonal avg. forecast
+    zonal_averages_forecast = Path("./get_zonal_averages_forecast")
+    zonal_averages_forecast.mkdir(exist_ok=True, parents=True)
+
+    ###
+    ### FIND ZONAL CLIMATOLOGY
+    ###
+
+    # Create output directories for climatology
+    zonal_averages_climatology = Path("./get_zonal_averages_climatology/")
+    zonal_averages_climatology.mkdir(exist_ok=True, parents=True)
+
+    # Create output directories for cachaed .nc climatology
+    climatology_cache_zarr = zonal_averages_climatology / 'tmp'
+    climatology_cache_zarr.mkdir(exist_ok=True, parents=True)
+    prob.purge_old_init(climatology_cache_zarr, current_init=initialization_date)
+
+    # Create output directories for zonal avg. [climatology]
+    zonal_climatology_tab = zonal_averages_climatology / 'zmean'
+    zonal_climatology_tab.mkdir(exist_ok=True, parents=True)
+
+    print(f"\n Output directory: {prob_output_dir}")
+    print(f"Subsampled directory: {subsampled_output_dir} \n")
+
+except Exception as e :
     print(f"{type(e).__name__}: {e}")
-    import traceback
     traceback.print_exc()
-
-
-# Create output directories
-prob_output_dir = Path('./get_ldas_probabilistic_output')
-prob_output_dir.mkdir(exist_ok=True, parents=True)
-
-# Create output directories for cached .zarr files
-prob_output_cache = prob_output_dir / 'tmp'
-prob_output_cache.mkdir(exist_ok=True, parents=True)
-prob.purge_old_init(prob_output_cache, current_init=initialization_date)
-
-# Create output directories for subsampled forecast files
-subsampled_output_dir = prob_output_dir / 'subsampled'
-subsampled_output_dir.mkdir(exist_ok=True, parents=True)
-prob.purge_old_init(subsampled_output_dir, current_init=initialization_date)
-
-###
-### FIND ZONAL AVG. OF FORECAST
-###
-
-# Create output directories for zonal avg. forecast
-zonal_averages_forecast = Path("./get_zonal_averages_forecast")
-zonal_averages_forecast.mkdir(exist_ok=True, parents=True)
-
-###
-### FIND ZONAL CLIMATOLOGY
-###
-
-# Create output directories for climatology
-zonal_averages_climatology = Path("./get_zonal_averages_climatology/")
-zonal_averages_climatology.mkdir(exist_ok=True, parents=True)
-
-# Create output directories for cachaed .nc climatology
-climatology_cache_zarr = zonal_averages_climatology / 'tmp'
-climatology_cache_zarr.mkdir(exist_ok=True, parents=True)
-prob.purge_old_init(climatology_cache_zarr, current_init=initialization_date)
-
-# Create output directories for zonal avg. [climatology]
-zonal_climatology_tab = zonal_averages_climatology / 'zmean'
-zonal_climatology_tab.mkdir(exist_ok=True, parents=True)
-
-print(f"\n Output directory: {prob_output_dir}")
-print(f"Subsampled directory: {subsampled_output_dir} \n")
-
 
 # ## Step 1 Generate Probabilistic Forecast Data Using Hindcast
 
-# ### Workflow initialization test, uncomment to run
-# 
-# ```python
-# hindcast = prob.read_trim_hindcast(hindcast_files, 'Rainf_tavg')
-# forecast = prob.read_trim_forecast(forecast_file, 'Rainf_tavg')
-# 
-# probs = prob.calculate_probabilities(hindcast, forecast) * 100
-# ```
 
 # ### Main processing loop
-
-# In[ ]:
-
 
 # Process each variable
 for variable, variable_longname in tqdm(list_of_variables.items()):  # Fixed: .items()
@@ -144,37 +143,12 @@ for variable, variable_longname in tqdm(list_of_variables.items()):  # Fixed: .i
         print("Filtering for maximum probabilities...")
         probs_with_nan = probs.where(probs == probs.max(dim='category'))
 
-        # Determine output file path base
+        # Output file path base
         output_file = prob_output_cache / f'{initialization_date}_tercile_prob_max_{variable}'
-	# Avoid zarr file overwriting error
+	    
+        # Avoid zarr file overwriting error
         if output_file.exists():
             prob.purge_dirct(output_file)
-
-        # Save by profile level for soil variables
-        # if variable in ['SoilMoist_inst', 'SoilTemp_inst']:
-        #     print(f"\nProcessing soil variable with profile levels...")
-
-        #     # Find profile dimension (various possible names)
-        #     profile_dims = [d for d in probs_with_nan.dims 
-        #                    if 'profile' in d.lower() or d in ['level', 'depth', 'SoilMoist_profiles', 'SoilTemp_profiles']]
-
-        #     if profile_dims:
-        #         profile_dim = profile_dims[0]
-        #         n_levels = len(probs_with_nan[profile_dim])
-        #         print(f"  Found {n_levels} levels in dimension: '{profile_dim}'")
-        #         print(f"  Level values: {probs_with_nan[profile_dim].values}")
-
-        #         # Save each level separately
-        #         for level_idx in range(n_levels):
-        #             level_data = probs_with_nan.isel({profile_dim: level_idx})
-        #             output_file = f'{file_base}_lvl_{level_idx}.nc'
-        #             level_data.to_netcdf(output_file)
-        #             print(f"  ✓ Saved level {level_idx} → {Path(output_file).name}")
-        #     else:
-        #         print(f"  ⚠ WARNING: No profile dimension found")
-        #         print(f"    Available dimensions: {list(probs_with_nan.dims)}")
-        #         print(f"    Saving as single file (lvl_0)")
-        #         probs_with_nan.to_netcdf(f'{file_base}_lvl_0.nc')
 
         if variable == 'Streamflow_tavg': # Extract river network
             river_mask_file = Path(f'./static/annual_mean_50cumecs_river_network.nc') # Read precalculated river mask file
@@ -228,7 +202,6 @@ print("="*60)
 
 # In[4]:
 
-
 # Data bounds for the region
 data_bounds = {'lon_min': -81.975, 
                'lon_max': -49.025, 
@@ -250,11 +223,9 @@ with open(index_path, "w") as f:
 print(f"✓ Wrote index.json → {index_path}")
 
 
-# ### Main processing loop
+# ### Sub-sampling loop
 
 # In[5]:
-
-
 for prob_cache_file in tqdm(prob_cache_files):
     print(f"\n{'='*60}")
     print(f"Processing: {prob_cache_file.name}")
@@ -296,7 +267,12 @@ print('='*60)
 
 
 # Load geodataframe and get all PFAF_IDs
-geodataframe_path = "https://raw.githubusercontent.com/blackteacatsu/spring_2024_envs_research_amazon_ldas/main/resources/hybas_sa_lev05_areaofstudy.geojson"
+geodataframe_path = '''
+https://raw.githubusercontent.com/blackteacatsu/\
+spring_2024_envs_research_amazon_ldas/\
+main/resources/hybas_sa_lev05_areaofstudy.geojson
+'''
+
 geodataframe = gpd.read_file(geodataframe_path)
 
 pfaf_ids_aoi = geodataframe.PFAF_ID.unique()
@@ -312,8 +288,8 @@ forecast_ds = xr.open_dataset(forecast_file)
 lon, lat, time = zonal.get_standard_coordinates(forecast_ds)
 #mask_3d = zonal.build_region_mask_3d(geodataframe, lon, lat)
 
-for pfaf_id in tqdm(pfaf_ids_aoi): # Iterate over each PFAF_ID
-    #print(f'Processing PFAF_ID: {pfaf_id}')
+for pfaf_id in tqdm(pfaf_ids_aoi): # Iterate over each region [by PFAF_ID]
+    #print(f'Processing PFAF_ID: {pfaf_id}') 
     aoi = geodataframe[geodataframe.PFAF_ID == pfaf_id]
 
     if aoi.empty:
@@ -321,18 +297,20 @@ for pfaf_id in tqdm(pfaf_ids_aoi): # Iterate over each PFAF_ID
     aoi_mask = regionmask.mask_3D_geopandas(aoi, lon, lat) # Create AOI mask
 
     records_forecast = [] # Initialize records_forecast list
+    
     # Iterate over time and ensemble dimensions
-
     for t in time.values:
         for ens in forecast_ds['ensemble'].values if 'ensemble' in forecast_ds.dims else [None]:
             row = {'time': pd.Timestamp(t).isoformat(), 'ensemble': ens, 'pfaf_id': pfaf_id} # Initialize row with time, ensemble, and PFAF_ID
             for var in list_of_variables.keys(): # Iterate over each variable
-                # Check if variable is SoilMoist_inst or SoilTemp_inst to handle levels
-                if var in ['SoilMoist_inst', 'SoilTemp_inst']: # var has more than one depth lvl.
+
+                # Check if variable is SoilMoist or SoilTemp
+                # then var has more than one depth lvl.
+                if var in ['SoilMoist_inst', 'SoilTemp_inst']: 
                     profile_dim = [d for d in forecast_ds[var].dims if 'profile' in d.lower()]
                     if profile_dim:
                         p_dim = profile_dim[0]
-                        for level_idx  in range (forecast_ds.sizes[p_dim]):
+                        for level_idx  in range(forecast_ds.sizes[p_dim]):
                             col = f'{var}_lvl_{level_idx}' # Create column name for soil moisture levels
                             data = forecast_ds[var].sel({'time': t, p_dim : level_idx})
                             if 'ensemble' in data.dims and ens is not None:
@@ -446,35 +424,10 @@ for pfaf_id in tqdm(pfaf_ids_aoi): # Iterate over each PFAF_ID
 
 # In[11]:
 
-
-from git import Repo
-
-os.getcwd()
-
-repo = Repo(os.getcwd())
-
-obs_ = []
-for f in subsampled_output_dir.glob('*'):
-    if f.name.endswith('.json'):
-        continue
-    if initialization_date not in f.name:
-        obs_.append(f)
-
-if len(obs_) > 0:
-    repo.index.remove(obs_, r=True)
-
 repo.index.add(f'{subsampled_output_dir}/{initialization_date}_*') # add subsampled prob anomaly
 repo.index.add(f'{subsampled_output_dir}/index.json') # add subsampled prob anomaly
 repo.index.add(f'{zonal_averages_forecast}/*.csv') # add forecast zonal avg.
 repo.index.add(f'{zonal_climatology_tab}/*.csv') # add zonal avg. climatology
-repo.index.commit(f"updated forecast anomaly data - {initialization_date}") # add commit message
+repo.index.commit(f"updated forecast anomaly data - {initialization_date}") # add git commit message
 
-prob.purge_old_init(subsampled_output_dir, current_init=initialization_date)
-
-
-# In[ ]:
-
-
-# origin = repo.remote('origin')
-# origin.push()
-
+# prob.purge_old_init(subsampled_output_dir, current_init=initialization_date)
