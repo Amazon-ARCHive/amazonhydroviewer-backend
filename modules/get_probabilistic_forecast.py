@@ -246,11 +246,9 @@ def purge_dirct(directory: Path):
     shutil.rmtree(directory)
 
 def purge_old_init(directory: Path, current_init: str):
-    #import shutil
     for f in list(directory.glob('*')):
         if f.name.endswith(".json"):
             continue
-            
         if current_init not in f.name:
             #shutil.rmtree(f)
             purge_dirct(f)
