@@ -1,4 +1,5 @@
 xarray
+dask[array]
 geopandas
 regionmask
 regionmask
@@ -13,3 +14,4 @@ matplotlib==3.8.0
 requests==2.32.4
 scipy==1.11.4
 gunicorn==21.2.0
+GitPython>=3.1,<4
