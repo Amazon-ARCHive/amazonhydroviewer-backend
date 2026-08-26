@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import re
@@ -20,15 +21,33 @@ _MONTHS = {
         ]
     )
 }
-_FORECAST_NAME_PATTERNS = (
+_FCST_NAME_PATTERNS = (
     re.compile(r"^ldas_fcst_(\d{4})_([a-z]{3})(\d{2})\.nc$", re.I),
     re.compile(r"^ldas_fcst_(\d{4})(\d{2})(\d{2})\.nc$", re.I),
 )
 
 
+@dataclass(frozen=True)
+class WorkingConditions:
+    """Input files and output directories used by one updater run."""
+
+    cwd: Path
+    fcst_file: Path
+    hcst_files: tuple[Path, ...]
+    fcst_date: datetime
+    init_date: str
+    prob_output_dir: Path
+    prob_output_cache: Path
+    subsampled_output_dir: Path
+    zonal_averages_fcst: Path
+    zonal_averages_climatology: Path
+    climatology_cache_zarr: Path
+    zonal_climatology_tab: Path
+
+
 def _parse_date_from_name(name: str) -> datetime | None:
-    """Parse an initialization date from a supported LDAS forecast filename."""
-    for index, pattern in enumerate(_FORECAST_NAME_PATTERNS):
+    """Parse an initialization date from a supported LDAS fcst filename."""
+    for index, pattern in enumerate(_FCST_NAME_PATTERNS):
         match = pattern.match(name)
         if not match:
             continue
@@ -51,11 +70,17 @@ def _parse_date_from_name(name: str) -> datetime | None:
 
 def split_fcst_hcst(
     dir_path: str | Path,
-    hdct_end_year: int = 2020,
+    hindcast_end_year: int = 2020,
+    fcst_init_date: datetime | None = None,
     prefix: str = "ldas_fcst_",
     recursive: bool = False,
 ) -> tuple[str, list[str], datetime]:
-    """Return the latest forecast and same-month hindcasts through a cutoff year."""
+    """
+    Return a selected fcst and same-month hindcasts through a cutoff year.
+
+    If ``fcst_init_date`` is omitted, the latest fcst is selected. If it is
+    provided, its year and month select a specific initialization month.
+    """
     base = Path(dir_path)
     if not base.is_dir():
         raise NotADirectoryError(f"Not a directory: {dir_path}")
@@ -77,21 +102,42 @@ def split_fcst_hcst(
         )
 
     items.sort(key=lambda item: (item[0], item[1], item[2]))
-    forecast_date, _, _, forecast_path = items[-1]
-    hindcasts = [
+    if fcst_init_date is None:
+        fcst_date, _, _, fcst_path = items[-1]
+    else:
+        requested_items = [
+            item
+            for item in items
+            if item[0].year == fcst_init_date.year
+            and item[0].month == fcst_init_date.month
+        ]
+        if not requested_items:
+            available_months = sorted(
+                {item[0].strftime("%Y-%m") for item in items},
+                reverse=True,
+            )
+            raise FileNotFoundError(
+                "No fcst initialization found for "
+                f"{fcst_init_date:%Y-%m} in {dir_path}. Available months: "
+                + ", ".join(available_months[:12])
+            )
+        fcst_date, _, _, fcst_path = requested_items[-1]
+
+    hcsts = [
         path
         for initialization, _, _, path in items
-        if initialization.year <= hdct_end_year
-        and initialization.month == forecast_date.month
+        if initialization.year <= hindcast_end_year
+        and initialization.month == fcst_date.month
         and initialization.day == 1
+        and initialization < fcst_date
     ]
-    hindcasts.sort(key=lambda path: _parse_date_from_name(path.name))
+    hcsts.sort(key=lambda path: _parse_date_from_name(path.name))
 
-    return str(forecast_path), [str(path) for path in hindcasts], forecast_date
+    return str(fcst_path), [str(path) for path in hcsts], fcst_date
 
 
-def read_trim_forecast(file_path: str | Path, variable: str) -> xr.DataArray:
-    """Open one forecast variable from a NetCDF dataset."""
+def read_trim_fcst(file_path: str | Path, variable: str) -> xr.DataArray:
+    """Open one fcst variable from a NetCDF dataset."""
     try:
         return xr.open_dataset(file_path)[variable]
     except KeyError:
@@ -99,13 +145,13 @@ def read_trim_forecast(file_path: str | Path, variable: str) -> xr.DataArray:
         raise
 
 
-def read_trim_hindcast(
+def read_trim_hcst(
     file_path: str | Path | Sequence[str | Path],
     variable: str,
 ) -> xr.DataArray:
     """Open one hindcast variable and rechunk its reduction dimensions."""
     try:
-        hindcast = xr.open_mfdataset(file_path, join="outer")[variable]
+        hcst = xr.open_mfdataset(file_path, join="outer")[variable]
     except KeyError:
         print(f"ERROR: Variable {variable} not found in hindcast dataset")
         raise
@@ -113,9 +159,9 @@ def read_trim_hindcast(
     chunk_dims = {
         dimension: -1
         for dimension in ("time", "ensemble")
-        if dimension in hindcast.dims
+        if dimension in hcst.dims
     }
-    return hindcast.chunk(chunk_dims) if chunk_dims else hindcast
+    return hcst.chunk(chunk_dims) if chunk_dims else hcst
 
 
 def _find_variable(
@@ -132,7 +178,7 @@ def _find_variable(
     )
 
 
-def get_standard_coordinates(
+def get_std_coords(
     dataset: xr.Dataset | xr.DataArray,
     lon_names: Sequence[str] | None = None,
     lat_names: Sequence[str] | None = None,
@@ -145,7 +191,7 @@ def get_standard_coordinates(
     return lon, lat, time
 
 
-def _purge_path(path: str | Path) -> None:
+def purge_path(path: str | Path) -> None:
     """Remove one file or directory tree if it exists."""
     target = Path(path)
     if target.is_dir():
@@ -160,5 +206,72 @@ def purge_old_init(directory: str | Path, current_init: str) -> None:
         if entry.suffix == ".json":
             continue
         if current_init not in entry.name:
-            _purge_path(entry)
+            purge_path(entry)
             print(f"Deleted (old init): {entry}")
+
+
+def initialize_working_cond(
+    cwd: str | Path,
+    surface_model_dir: str | Path,
+    hcst_end_year: int = 2020,
+    fcst_init_date: datetime | None = None,
+) -> WorkingConditions:
+    """Discover model inputs and prepare output directories for an updater run.
+
+    Git operations intentionally remain in ``updater.py``. This helper only manages
+    filesystem state and returns the paths the update workflow needs.
+    """
+    working_directory = Path(cwd).expanduser().resolve()
+    fcst, hcst, fcst_date = split_fcst_hcst(
+        Path(surface_model_dir).expanduser(),
+        hcst_end_year,
+        fcst_init_date,
+    )
+    init_date = (
+        f"{fcst_date.year}_{fcst_date.strftime('%b').lower()}"
+    )
+
+    prob_output_dir = working_directory / "get_ldas_probabilistic_output"
+    prob_output_cache = prob_output_dir / "tmp"
+    subsampled_output_dir = prob_output_dir / "subsampled"
+    zonal_averages_fcst = working_directory / "get_zonal_averages_fcst"
+    zonal_averages_climatology = (
+        working_directory / "get_zonal_averages_climatology"
+    )
+    climatology_cache_zarr = zonal_averages_climatology / "tmp"
+    zonal_climatology_tab = zonal_averages_climatology / "zmean"
+
+    for directory in (
+        prob_output_cache,
+        subsampled_output_dir,
+        zonal_averages_fcst,
+        climatology_cache_zarr,
+        zonal_climatology_tab,
+    ):
+        directory.mkdir(exist_ok=True, parents=True)
+
+    purge_old_init(prob_output_cache, current_init=init_date)
+    purge_old_init(subsampled_output_dir, current_init=init_date)
+    purge_old_init(climatology_cache_zarr, current_init=init_date)
+
+    conditions = WorkingConditions(
+        cwd=working_directory,
+        fcst_file=Path(fcst),
+        hcst_files=tuple(Path(path) for path in hcst),
+        fcst_date=fcst_date,
+        init_date=init_date,
+        prob_output_dir=prob_output_dir,
+        prob_output_cache=prob_output_cache,
+        subsampled_output_dir=subsampled_output_dir,
+        zonal_avg_fcst=zonal_averages_fcst,
+        zonal_avg_climatology=zonal_averages_climatology,
+        climatology_cache_zarr=climatology_cache_zarr,
+        zonal_climatology_tab=zonal_climatology_tab,
+    )
+
+    print("Found latest forecast file:", conditions.fcst_file)
+    print("Hindcasts   :", len(conditions.hcst_files), "files")
+    print("Forecast initialization date:", conditions.init_date)
+    print("Output directory:", conditions.prob_output_dir)
+    print("Subsampled directory:", conditions.subsampled_output_dir)
+    return conditions
