@@ -418,9 +418,10 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Ignore test and tmp files
+# Ignore test and tmp files when tracking/pushing
 tmp
 core
 testbench
-.vscode
+
+# macOS
 .DS_Store
