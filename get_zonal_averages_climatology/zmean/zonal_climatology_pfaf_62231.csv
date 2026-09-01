@@ -1,7 +1,7 @@
-month,pfaf_id,Rainf_tavg,Qair_f_tavg,Qs_tavg,Evap_tavg,Tair_f_tavg,SoilMoist_inst_lvl_0,SoilMoist_inst_lvl_1,SoilMoist_inst_lvl_2,SoilMoist_inst_lvl_3,SoilTemp_inst_lvl_0,SoilTemp_inst_lvl_1,SoilTemp_inst_lvl_2,SoilTemp_inst_lvl_3,Streamflow_tavg
-7,62231,,,,,,,,,,,,,,190930.140625
-8,62231,,,,,,,,,,,,,,135597.53125
-9,62231,,,,,,,,,,,,,,84756.6796875
-10,62231,,,,,,,,,,,,,,57626.7734375
-11,62231,,,,,,,,,,,,,,51546.6328125
-12,62231,,,,,,,,,,,,,,57269.93359375
+pfaf_id,month,Rainf_tavg,Qair_f_tavg,Qs_tavg,Evap_tavg,Tair_f_tavg,SoilMoist_inst_lvl_0,SoilMoist_inst_lvl_1,SoilMoist_inst_lvl_2,SoilMoist_inst_lvl_3,SoilTemp_inst_lvl_0,SoilTemp_inst_lvl_1,SoilTemp_inst_lvl_2,SoilTemp_inst_lvl_3,Streamflow_tavg
+62231,1,,,,,,,,,,,,,,75581.37
+62231,8,,,,,,,,,,,,,,174076.72
+62231,9,,,,,,,,,,,,,,119119.38
+62231,10,,,,,,,,,,,,,,69568.99
+62231,11,,,,,,,,,,,,,,53656.457
+62231,12,,,,,,,,,,,,,,58379.227
