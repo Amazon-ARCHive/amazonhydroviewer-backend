@@ -5,7 +5,7 @@ set -e
 source /home/local/WIN/qsu4/miniconda3/etc/profile.d/conda.sh
 conda activate analytics
 
-current_date_time= "$(date +%Y-%m-%d)"
+current_date_time="$(date +%Y-%m-%d)"
 
 mkdir -p logs
 
