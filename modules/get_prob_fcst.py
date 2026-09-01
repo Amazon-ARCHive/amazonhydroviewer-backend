@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import xarray as xr
 import numpy as np
 from pathlib import Path
 
 import modules.utils as utils
-
-# Backward-compatible name retained for notebooks that used the old module API.
-purge_dirct = utils.purge_path
 
 
 def get_thresh(icat : int,
@@ -112,10 +111,10 @@ def calculate_probabilities(hcst : xr.DataArray,
 
 
 def mainloop(
-        variables : dict[str : str],
+        variables : Mapping[str, str] | Sequence[str],
         hdct_files : list[Path],
         fcst_file : Path,
-        prob_output_cache : Path,
+        prob_fcst_cache_dir : Path,
         init_date : str,
         river_mask_file : Path
 ) -> None:
@@ -130,16 +129,16 @@ def mainloop(
 
         try:
             print("Loading hindcast data...")
-            hindcast = utils.read_trim_hcst(hdct_files, variable)
-            print(f"  Shape: {hindcast.shape}")
+            hcst = utils.read_trim_hcst(hdct_files, variable)
+            print(f"  Shape: {hcst.shape}")
 
             print("Loading forecast data...")
-            forecast = utils.read_trim_fcst(fcst_file, variable)
-            print(f"  Shape: {forecast.shape}")
+            fcst = utils.read_trim_fcst(fcst_file, variable)
+            print(f"  Shape: {fcst.shape}")
 
             # Calculate probabilities (convert to percentages)
             print("Calculating tercile probabilities...")
-            probs = calculate_probabilities(hindcast, forecast) * 100
+            probs = calculate_probabilities(hcst, fcst) * 100
             print(f"\n Probability data shape: {probs.shape}")
             print(f"Dimensions: {probs.dims} Categories: {probs.category.values}")
             #print(f"Time steps: {len(probs.time)}")
@@ -149,15 +148,21 @@ def mainloop(
             probs_with_nan = probs.where(probs == probs.max(dim='category'))
 
             # Output file path base
-            output_file = prob_output_cache / f'{init_date}_tercile_prob_max_{variable}'
+            output_file = prob_fcst_cache_dir / f'{init_date}_tercile_prob_max_{variable}'
 
             if variable == "Streamflow_tavg":
-                if river_mask_file.exists():
-                    river_network = xr.open_dataset(river_mask_file)['mask']
-                    print()
-                    print()
-                else:
-                    print("File not found: {river_mask_file}")
+                if not river_mask_file.exists():
+                    raise FileNotFoundError(
+                        f"File not found: {river_mask_file}"
+                    )
+                with xr.open_dataset(river_mask_file) as river_ds:
+                    river_network = river_ds['mask'].load()
+                # if river_mask_file.exists():
+                #     river_network = xr.open_dataset(river_mask_file)['mask']
+                #     print()
+                #     print()
+                # else:
+                #     print("File not found: {river_mask_file}")
                 probs_with_nan = probs_with_nan.where(river_network)
                 probs_with_nan.to_zarr(output_file, zarr_format = 2, mode = "w")
                 print(f"  ✓ Saved → {Path(output_file).name}")
@@ -168,22 +173,22 @@ def mainloop(
 
             print(f"\n ✓ Completed {variable} ")
 
-        except Exception as e:
-            print(f"\n✗ ERROR processing {variable}:")
-            print(f"  {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+        except Exception as exc:
+            # print(f"\n✗ ERROR processing {variable}:")
+            # print(f"  {type(e).__name__}: {e}")
+            raise RuntimeError(
+                f"\n✗ ERROR : Failed to generate probabilistic forecast for {variable}"
+            ) from exc
 
         finally:
         # Clean up memory
             print("Cleaning up memory...")
             try:
-                del hindcast, forecast, probs, probs_with_nan
+                del hcst, fcst, probs, probs_with_nan
             except:
                 pass
             gc.collect()
 
     print("\n" + "="*60)
-    print("✓ All variables processed!")
+    print("✓ All variables processed successfully!")
     print("="*60)

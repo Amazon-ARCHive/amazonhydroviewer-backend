@@ -32,17 +32,17 @@ class WorkingConditions:
     """Input files and output directories used by one updater run."""
 
     cwd: Path
-    fcst_file: Path
-    hcst_files: tuple[Path, ...]
-    fcst_date: datetime
-    init_date: str
-    prob_output_dir: Path
-    prob_output_cache: Path
-    subsampled_output_dir: Path
-    zonal_averages_fcst: Path
-    zonal_averages_climatology: Path
-    climatology_cache_zarr: Path
-    zonal_climatology_tab: Path
+    fcst_file : Path
+    hcst_files : tuple[Path, ...]
+    fcst_date : datetime
+    init_date : str
+    prob_fcst_dir : Path 
+    prob_fcst_cache_dir : Path
+    prob_fcst_subsampled_dir : Path
+    zonal_avg_fcst_tab_dir : Path
+    zonal_avg_climatology_dir : Path
+    climatology_cache_dir : Path
+    zonal_avg_climatology_tab_dir : Path
 
 
 def _parse_date_from_name(name: str) -> datetime | None:
@@ -70,8 +70,9 @@ def _parse_date_from_name(name: str) -> datetime | None:
 
 def split_fcst_hcst(
     dir_path: str | Path,
-    hindcast_end_year: int = 2020,
-    fcst_init_date: datetime | None = None,
+    hcst_start_year : int = 2001,
+    hcst_end_year: int = 2020, # CLI args 
+    fcst_init_date: datetime | None = None, 
     prefix: str = "ldas_fcst_",
     recursive: bool = False,
 ) -> tuple[str, list[str], datetime]:
@@ -126,7 +127,7 @@ def split_fcst_hcst(
     hcsts = [
         path
         for initialization, _, _, path in items
-        if initialization.year <= hindcast_end_year
+        if hcst_start_year <= initialization.year <= hcst_end_year
         and initialization.month == fcst_date.month
         and initialization.day == 1
         and initialization < fcst_date
@@ -211,10 +212,11 @@ def purge_old_init(directory: str | Path, current_init: str) -> None:
 
 
 def initialize_working_cond(
-    cwd: str | Path,
-    surface_model_dir: str | Path,
-    hcst_end_year: int = 2020,
-    fcst_init_date: datetime | None = None,
+    cwd : str | Path,
+    surface_model_dir : str | Path,
+    hcst_start_year : int = 2001, 
+    hcst_end_year : int = 2020,
+    fcst_init_date : datetime | None = None,
 ) -> WorkingConditions:
     """Discover model inputs and prepare output directories for an updater run.
 
@@ -224,35 +226,47 @@ def initialize_working_cond(
     working_directory = Path(cwd).expanduser().resolve()
     fcst, hcst, fcst_date = split_fcst_hcst(
         Path(surface_model_dir).expanduser(),
+        hcst_start_year,
         hcst_end_year,
         fcst_init_date,
     )
+    if not hcst:
+        raise FileNotFoundError(
+            "No hindcast files matched the requested year range "
+            f" {hcst_start_year}-{hcst_end_year} and forecast month. "
+        )
+
     init_date = (
         f"{fcst_date.year}_{fcst_date.strftime('%b').lower()}"
     )
 
-    prob_output_dir = working_directory / "get_ldas_probabilistic_output"
-    prob_output_cache = prob_output_dir / "tmp"
-    subsampled_output_dir = prob_output_dir / "subsampled"
-    zonal_averages_fcst = working_directory / "get_zonal_averages_fcst"
-    zonal_averages_climatology = (
+    # probabilistic forecast output directory(s)
+    prob_fcst_dir = working_directory / "get_ldas_probabilistic_output"
+    prob_fcst_cache_dir = prob_fcst_dir / "tmp" # tmp zarr files
+    prob_fcst_subsampled_dir = prob_fcst_dir / "subsampled" # final sub-sampled output
+
+    # zonal averaged forecast tabular directory
+    zonal_avg_fcst_tab_dir = working_directory / "get_zonal_averages_fcst"
+
+    # zonal averaged climatology cache & tabular directory
+    zonal_avg_climatology_dir = (
         working_directory / "get_zonal_averages_climatology"
     )
-    climatology_cache_zarr = zonal_averages_climatology / "tmp"
-    zonal_climatology_tab = zonal_averages_climatology / "zmean"
+    climatology_cache_dir = zonal_avg_climatology_dir / "tmp"
+    zonal_avg_climatology_tab_dir = zonal_avg_climatology_dir / "zmean"
 
     for directory in (
-        prob_output_cache,
-        subsampled_output_dir,
-        zonal_averages_fcst,
-        climatology_cache_zarr,
-        zonal_climatology_tab,
+        prob_fcst_cache_dir,
+        prob_fcst_subsampled_dir,
+        zonal_avg_fcst_tab_dir,
+        climatology_cache_dir,
+        zonal_avg_climatology_tab_dir,
     ):
         directory.mkdir(exist_ok=True, parents=True)
 
-    purge_old_init(prob_output_cache, current_init=init_date)
-    purge_old_init(subsampled_output_dir, current_init=init_date)
-    purge_old_init(climatology_cache_zarr, current_init=init_date)
+    purge_old_init(prob_fcst_cache_dir, current_init=init_date)
+    purge_old_init(prob_fcst_subsampled_dir, current_init=init_date)
+    purge_old_init(climatology_cache_dir, current_init=init_date)
 
     conditions = WorkingConditions(
         cwd=working_directory,
@@ -260,18 +274,18 @@ def initialize_working_cond(
         hcst_files=tuple(Path(path) for path in hcst),
         fcst_date=fcst_date,
         init_date=init_date,
-        prob_output_dir=prob_output_dir,
-        prob_output_cache=prob_output_cache,
-        subsampled_output_dir=subsampled_output_dir,
-        zonal_avg_fcst=zonal_averages_fcst,
-        zonal_avg_climatology=zonal_averages_climatology,
-        climatology_cache_zarr=climatology_cache_zarr,
-        zonal_climatology_tab=zonal_climatology_tab,
+        prob_fcst_dir=prob_fcst_dir,
+        prob_fcst_cache_dir=prob_fcst_cache_dir,
+        prob_fcst_subsampled_dir=prob_fcst_subsampled_dir,
+        zonal_avg_fcst_tab_dir=zonal_avg_fcst_tab_dir,
+        zonal_avg_climatology_dir=zonal_avg_climatology_dir,
+        climatology_cache_dir=climatology_cache_dir,
+        zonal_avg_climatology_tab_dir=zonal_avg_climatology_tab_dir,
     )
 
     print("Found latest forecast file:", conditions.fcst_file)
     print("Hindcasts   :", len(conditions.hcst_files), "files")
     print("Forecast initialization date:", conditions.init_date)
-    print("Output directory:", conditions.prob_output_dir)
-    print("Subsampled directory:", conditions.subsampled_output_dir)
+    print("Output directory:", conditions.prob_fcst_dir)
+    print("Subsampled directory:", conditions.prob_fcst_subsampled_dir)
     return conditions

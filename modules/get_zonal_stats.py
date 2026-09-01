@@ -53,14 +53,18 @@ def build_region_mask_3d(
         lat,
         numbers=number_column,
     )
-    aoi_ids = aoi.iloc[mask["region"].values][region_id_column]
+    aoi_ids = (
+        aoi.iloc[mask["region"].values][region_id_column]
+        .to_numpy()
+    )
     return mask.assign_coords(region = aoi_ids).rename(region = REGION_DIM)
+
 
 def _aggregate_variable(
         data: xr.DataArray,
         region_mask: xr.DataArray,
         variable: str,
-        ensemble_averaged: bool
+        average_ensemble: bool = False
 ) -> xr.DataArray:
     """
     Aggregate one variable over all regions in a vectorized xarray operation
@@ -72,13 +76,14 @@ def _aggregate_variable(
     Returns:
         xarray.DataArray
     """
-    if ensemble_averaged and "ensemble" in data.dims:
+    if average_ensemble and "ensemble" in data.dims:
         data = data.mean(dim="ensemble")
 
     masked = data.where(region_mask)
     if variable == STREAMFLOW_VAR:
-        return masked.max()
-    return masked.mean(dim=SPATIAL_DIMS, skipna=True).item()
+        return masked.max(dim=SPATIAL_DIMS, skipna=True)
+    return masked.mean(dim=SPATIAL_DIMS, skipna=True)
+
 
 def _variable_frame(
         aggregated_ds : xr.DataArray,
@@ -95,25 +100,26 @@ def _variable_frame(
     Returns:
         pandas.DataFrame
     """
-    profile_dimension = [
-        dimension for dimensions in aggregated_ds.dims
-        if "profiles" in dimension.lower()
+    profile_dim = [
+        dim for dim in aggregated_ds.dims
+        if "profile" in dim.lower()
     ]
 
-    if len(profile_dimension) > 1:
+    if len(profile_dim) > 1:
         raise ValueError(f"Multiple profile dimensions found for {variable}")
 
-    for dimension in row_dimensions:
-        if dimension not in aggregated_ds.dims:
-            aggregated_ds = aggregated_ds.expand_dims({dimension: [None]})
+    for dim in row_dimensions:
+        if dim not in aggregated_ds.dims:
+            aggregated_ds = aggregated_ds.expand_dims({dim: [None]})
 
-    if profile_dimension:
-        profile_dimension = profile_dimension[0]
-        frame = aggregated_ds.to_series().unstack(profile_dimension)
+    if profile_dim:
+        profile_dim = profile_dim[0]
+        frame = aggregated_ds.to_series().unstack(profile_dim)
         frame.columns = [
             f'{variable}_lvl_{level_idx}'
             for level_idx in range(len(frame.columns))
         ]
+        frame = frame.reset_index()
 
     else:
         frame = aggregated_ds.to_series().rename(variable).reset_index()
@@ -130,12 +136,18 @@ def _merge_variable_frames(
     if not frames:
         return pd.DataFrame(columns=row_dimensions)
 
+    table = frames[0]
+    for frame in frames[1:]:
+        table = table.merge(frame, on=list(row_dimensions), 
+                            how="outer", validate="1:1")
+    return table.sort_values(list(row_dimensions)).reset_index(drop=True)
+
 
 def fcst_zonal_table(
         fcst_ds : xr.Dataset,
         geodataframe: gpd.GeoDataFrame,
         variables : Sequence[str],
-) -> pd.Dataframe:
+) -> pd.DataFrame:
     """
     Build one forecast table containing every requested hydrological region.
     Args:
@@ -150,10 +162,12 @@ def fcst_zonal_table(
     region_mask = build_region_mask_3d(geodataframe, lon, lat)
     row_dimensions = (REGION_DIM, "time", "ensemble")
     frames = []
+    missing =[variable for variable in variables if variable not in fcst_ds]
+    if missing:
+        raise KeyError(
+            f"Skipping forecast variable not found: {missing}"
+        )
     for variable in variables:
-        if variable not in fcst_ds:
-            print(f"Skipping forecast variable not found: {variable}")
-            continue
         aggregated = _aggregate_variable(
             fcst_ds[variable], region_mask, variable, average_ensemble=False
         )
@@ -203,7 +217,7 @@ def climatology_zonal_table(
     for variable in variables:
         climatology = get_var_climatology(hindcast_files_path, variable)
         if region_mask is None:
-            lon, lat, _ = utils.get_std_coords(hindcast_files_path, variable)
+            lon, lat, _ = utils.get_std_coords(climatology)
             region_mask = build_region_mask_3d(geodataframe, lon, lat)
 
         if cache_dir is not None:
@@ -217,7 +231,7 @@ def climatology_zonal_table(
                 utils.purge_path(cache_path)
             climatology.to_zarr(cache_path, zarr_format=2, mode='w')
         aggregated = _aggregate_variable(
-            climatology, region_mask, variable, ensemble_averaged=True
+            climatology, region_mask, variable, average_ensemble=True
         )
         frames.append(_variable_frame(aggregated, variable, row_dims))
 
@@ -242,12 +256,12 @@ def write_zonal_tables(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for region_id, region_table in table.groupby(REGION_ID_COL, sort=True):
+    for region_id, region_table in table.groupby(REGION_DIM, sort=True):
         output_path = (
             output_dir
             / f"{filename_prefix}_pfaf_{region_id}.csv"
         )
-        region_table.to_csv(output_path)
+        region_table.to_csv(output_path, index=False)
         written.append(output_path)
     return written
 
@@ -256,13 +270,12 @@ def get_zonal_tables(
         variables : Mapping[str, str] | Sequence[str],
         fcst_file : Path,
         hdct_files : Sequence[str | Path],
-        aoi_polygon_file: Path,
-        zonal_fcst_output ,
-        fcst_output_dir: Path,
-        climatology_output_dir: Path,
+        aoi_polygon_file : Path,
+        zonal_avg_fcst_tab_dir : Path ,
+        zonal_avg_climatology_tab_dir : Path,
         *,
-        climatology_cache_dir: Path,
-        initialization_date: str,
+        climatology_cache_dir : Path,
+        init_date : str,
 ) -> tuple[list[Path], list[Path]]:
     """
     Executes the entire Section 3; tabular data for boxplot. 
@@ -288,7 +301,7 @@ def get_zonal_tables(
             fcst, geodataframe, variable_names
         )
     fcst_paths = write_zonal_tables(
-        fcst_tab, fcst_output_dir, "zonal_fcst"
+        fcst_tab, zonal_avg_fcst_tab_dir, "zonal_fcst"
     )
     
     climatology_tab = climatology_zonal_table(
@@ -296,10 +309,12 @@ def get_zonal_tables(
         geodataframe=geodataframe,
         variables=variable_names,
         cache_dir=climatology_cache_dir,
-        initialization_date=initialization_date
+        initialization_date=init_date
     )
     climatology_paths = write_zonal_tables(
-        climatology_tab, climatology_cache_dir, "zonal_climatology"
+        climatology_tab, 
+        zonal_avg_climatology_tab_dir, 
+        "zonal_climatology"
     )
     print(
         f"Wrote {len(fcst_paths)} forecast and \n"

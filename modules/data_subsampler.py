@@ -267,7 +267,9 @@ def get_tile_data(
         pyramid : dict,
         zoom : int,
         tile_x : int,
-        tile_y: int
+        tile_y: int,
+        time_idx : int = 0,
+        category_idx : int = 0
 ):
     """
     Extract data for a specific tile at a given zoom level
@@ -423,7 +425,7 @@ def subsample_updates(
         cache_dir : Path,
         target_dir : Path,
         data_bounds : dict[str, float],
-        initialization_date : dict,
+        init_date : str,
 ) -> None:
     """
     Apply 
@@ -437,9 +439,13 @@ def subsample_updates(
     # Collect files from the cache directory
     cache_files = list(cache_dir.glob('*_tercile_prob_*'))
     print(f"Found {len(cache_files)} files to process! \n")
+    if not cache_files:
+        raise FileNotFoundError(
+            f"No probabilistic forecast caches found in {cache_dir}"
+        )
 
     index = {
-        "initialization_date": f'{initialization_date}'
+        "initialization_date": f'{init_date}'
     }
 
     index_path = target_dir / "index.json"
@@ -477,6 +483,8 @@ def subsample_updates(
 
             print(f"\n  ✓ Saved → {out_dir}")
 
-        except Exception as e:
-            print(f"\n  ✗ ERROR: {type(e).__name__}: {e}")
-            continue
+        except Exception as exc:
+            #print(f"\n  ✗ ERROR: {type(e).__name__}: {e}")
+            raise RuntimeError(
+                f"\n  ✗ ERROR: Unable to Subsample {cache_file.name}"
+            ) from exc
