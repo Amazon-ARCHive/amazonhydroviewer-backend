@@ -425,3 +425,6 @@ testbench
 
 # macOS
 .DS_Store
+
+# Bash Automation
+nohup.out
