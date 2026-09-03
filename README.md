@@ -41,12 +41,14 @@ to be added soon
 ### Setup
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/yourusername/amazon_hydroviewer_backend.git
    cd amazon_hydroviewer_backend
    ```
 
 2. **Create a virtual environment** (recommended)
+
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -58,6 +60,13 @@ to be added soon
    ```
 
 ## Usage
+
+> [!NOTE]
+> Backward-compatible name retained for notebooks that used the old module API.
+>
+> ```python
+> purge_dirct = utils.purge_path
+> ```
 
 ### Computing Zonal Averages [This current version removes this]
 
@@ -93,6 +102,7 @@ jupyter notebook get_ldas_base_climatology.ipynb
 ## Dependencies
 
 Core Python libraries:
+
 - `xarray`: Multi-dimensional array processing
 - `geopandas`: Geospatial data manipulation
 - `regionmask`: Spatial mask generation
@@ -105,10 +115,10 @@ See [requirements.txt](requirements.txt) for complete dependency list.
 
 Processed data is exported as CSV files with the following structure:
 
-| time | Variable1 | Variable2 | ... | PFAF_ID |
-|------|-----------|-----------|-----|---------|
-| 2024-12-01T00:00:00 | 2.34 | 15.67 | ... | 6510000010 |
-| 2024-12-01T03:00:00 | 2.45 | 15.89 | ... | 6510000010 |
+| time                | Variable1 | Variable2 | ... | PFAF_ID    |
+| ------------------- | --------- | --------- | --- | ---------- |
+| 2024-12-01T00:00:00 | 2.34      | 15.67     | ... | 6510000010 |
+| 2024-12-01T03:00:00 | 2.45      | 15.89     | ... | 6510000010 |
 
 Each row represents a time step, with columns for each processed variable and a PFAF_ID identifier.
 
