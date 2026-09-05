@@ -16,9 +16,9 @@ class HydroViewerSubsampler:
     
     def __init__(
             self,
-            data,
-            resolution=256
-    ):
+            data :  xr.DataArray,
+            resolution : int =256
+    )->None:
         """
         Parameters
         ----------
@@ -75,9 +75,9 @@ class HydroViewerSubsampler:
     
     def pick_grain_sizes(
             self, 
-            zooms : list[np.Array], 
-            factor=1.0
-    ):
+            zooms : list[np.ndarray], 
+            factor : int =1.0
+    )->list[int]:
         """
         Calculate appropriate grain size for each zoom level
         Adapted from Poseidon's pick_grain_size
@@ -106,7 +106,7 @@ class HydroViewerSubsampler:
         avail_dx = avail * rep_dx
         
         print(f"\nAvailable grain sizes: {avail}")
-        print(f"Available resolutions (m): {avail_dx}")
+        print(f"Available resolutions (m): {avail_dx} \n")
         
         grains = []
         for zoom, dx in zip(zooms, interp_dx):
@@ -122,7 +122,10 @@ class HydroViewerSubsampler:
         return grains
 
     
-    def subsample_data(self, grain):
+    def subsample_data(
+            self, 
+            grain : int
+    ) -> xr.DataArray:
         """
         Subsample data by taking every grain-th point
         Adapted from Poseidon's subsample_ocedata
@@ -157,8 +160,8 @@ class HydroViewerSubsampler:
     
     def generate_pyramid(
             self, 
-            zooms=None
-    ) -> tuple[dict, dict]:
+            zooms :list[int] = None
+    ) -> tuple[dict]:
         """
         Generate the full resolution pyramid
         
@@ -217,7 +220,7 @@ def lonlat_for_tile(
         tile_x : int, 
         tile_y : int, 
         resolution : int =256
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray]:
     """
     Create lat/lon coordinates for a Web Mercator tile
     Adapted from Poseidon's lonlat4global_map

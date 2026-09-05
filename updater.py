@@ -36,7 +36,7 @@ LIST_OF_VARIABLES = {
     'Streamflow_tavg': 'Stream flow'
 }
 
-# Data bounds for the region
+# Data bounds of AOI used for Sub-sampling
 DATA_BOUNDS = {'lon_min': -81.975, 
                'lon_max': -49.025, 
                'lat_min': -20.975, 
@@ -88,7 +88,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aoi-polygon-file", type=Path, default=AOI_MASK_POLYGON)
     
     return parser.parse_args()
-
 
 
 def main() -> None:
