@@ -3,12 +3,15 @@ Pyramid-based tile server for HydroViewer
 Optimized for Shiny + ipyleaflet integration
 """
 
+from __future__ import annotations
+
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
 from PIL import Image
 from io import BytesIO
 from urllib.parse import urljoin
 from pathlib import Path
+from collections.abc import Sequence, Mapping
 import json
 import os
 import hashlib
@@ -27,11 +30,9 @@ TILE_SIZE = 256
 BACKEND_DIR = os.getcwd()
 PYRAMID_DIR = os.path.join(BACKEND_DIR, 'get_ldas_probabilistic_output', 'subsampled')
 TILE_IMAGE_CACHE = {}  # Cache rendered tiles
-API_VERSION = "2026-02-08"
+API_VERSION = "2026-09-04-streamflow-overzoom"
 MAX_META_CACHE = 1
 MAX_TILE_CACHE = 50
-MAX_SPARSE_VAR_SLICE_CACHE = 4
-SPARSE_VAR_SOURCE_RADIUS = 1.5
 
 class RegionalTileServer:
     """Serves tiles from pyramids using regional coordinates"""
@@ -43,7 +44,6 @@ class RegionalTileServer:
         self.data_bounds = None
         self._index_cache = None
         self._stem_cache = {}
-        self._streamflow_slice_cache = {}
 
     def _is_remote(self):
         return str(PYRAMID_DIR).startswith(("http://", "https://"))
@@ -69,7 +69,7 @@ class RegionalTileServer:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _open_npz_ref(self, ref):
+    def _open_npz_ref(self, ref) -> np.ndarray:
         if str(ref).startswith(("http://", "https://")):
             r = requests.get(ref, timeout=60)
             if r.status_code == 404:
@@ -90,6 +90,7 @@ class RegionalTileServer:
         except FileNotFoundError:
             self._index_cache = {}
         return self._index_cache
+
     
     def _stem(self, variable: str) -> str:
         cache_key = variable
@@ -128,6 +129,7 @@ class RegionalTileServer:
         raise FileNotFoundError(
             f"Could not resolve pyramid stem for variable '{variable}' in {PYRAMID_DIR}"
         )
+
     
     def _base_dir_url(self, variable: str) -> str:
         """
@@ -135,8 +137,9 @@ class RegionalTileServer:
         """
         stem = self._stem(variable)
         return self._join_ref(PYRAMID_DIR, stem)
+
     
-    def load_pyramid_meta(self, variable):
+    def load_pyramid_meta(self, variable : str):
         """Load pyramid metadata from remote."""
         cache_key = self._stem(variable)
         if cache_key in self.pyramids:
@@ -291,100 +294,49 @@ class RegionalTileServer:
             return requested_zoom
         return min(available, key=lambda k: abs(k - requested_zoom))
 
-    @staticmethod
-    def expand_sparse_source(values_2d, radius=SPARSE_VAR_SOURCE_RADIUS):
-        """Expand finite cells into nearby source-grid cells before sampling.
+    def get_render_zoom(self, variable: str, requested_zoom: int) -> int:
+        """Cap sparse Streamflow rendering at its first full-resolution level."""
+        if "streamflow" not in variable.lower():
+            return int(requested_zoom)
 
-        Streamflow is stored as a sparse raster. Giving each river cell a
-        stable source-grid footprint prevents it from disappearing when a tile
-        happens to sample only neighboring NaN cells.
-        """
-        data = np.asarray(values_2d, dtype=np.float32)
-        if data.ndim != 2:
-            raise ValueError(f"values_2d must be 2D, got shape {data.shape}")
-        if radius <= 0 or not np.any(np.isfinite(data)):
-            return data.copy()
-
-        out = data.copy()
-        height, width = data.shape
-        max_offset = int(np.ceil(radius))
-        radius_sq = float(radius) ** 2
-        offsets = sorted(
-            (dy * dy + dx * dx, dy, dx)
-            for dy in range(-max_offset, max_offset + 1)
-            for dx in range(-max_offset, max_offset + 1)
-            if (dy != 0 or dx != 0) and dy * dy + dx * dx <= radius_sq
-        )
-
-        # Copy only from the original data so newly filled cells cannot spread
-        # farther than the requested source-grid radius.
-        for _, dy, dx in offsets:
-            if dy >= 0:
-                src_y = slice(0, height - dy)
-                dst_y = slice(dy, height)
-            else:
-                src_y = slice(-dy, height)
-                dst_y = slice(0, height + dy)
-
-            if dx >= 0:
-                src_x = slice(0, width - dx)
-                dst_x = slice(dx, width)
-            else:
-                src_x = slice(-dx, width)
-                dst_x = slice(0, width + dx)
-
-            source = data[src_y, src_x]
-            destination = out[dst_y, dst_x]
-            fill = ~np.isfinite(destination) & np.isfinite(source)
-            destination[fill] = source[fill]
-
-        return out
-
-    def get_render_level_slice(
-        self,
-        variable: str,
-        z: int,
-        time_input,
-        category_idx: int,
-        profile_idx: int = 0,
-    ):
-        """Load and prepare one source slice for tile rendering."""
         meta = self.load_pyramid_meta(variable)
-        grain = int(meta.get("grain_map", {}).get(str(int(z)), 1))
-        is_streamflow = "streamflow" in variable.lower()
-
-        if not is_streamflow or grain != 1:
-            return self.get_level_slice(
-                variable, z, time_input, category_idx, profile_idx
-            )
-
-        cache_key = (
-            self._stem(variable),
-            int(z),
-            str(time_input),
-            int(category_idx),
-            int(profile_idx),
-            float(SPARSE_VAR_SOURCE_RADIUS),
+        full_resolution_zooms = sorted(
+            int(z)
+            for z, grain in meta.get("grain_map", {}).items()
+            if int(grain) == 1
         )
-        cached = self._streamflow_slice_cache.pop(cache_key, None)
-        if cached is not None:
-            # Reinsert so eviction behaves as a small least-recently-used cache.
-            self._streamflow_slice_cache[cache_key] = cached
-            return cached
+        if not full_resolution_zooms:
+            return int(requested_zoom)
+        return min(int(requested_zoom), full_resolution_zooms[0])
 
-        values_2d, lat, lon = self.get_level_slice(
-            variable, z, time_input, category_idx, profile_idx
-        )
-        prepared = (
-            self.expand_sparse_source(values_2d),
-            np.asarray(lat),
-            np.asarray(lon),
-        )
+    @staticmethod
+    def overzoom_parent_tile(parent_tile, requested_zoom, parent_zoom, x, y):
+        """Crop and upscale the requested child of a rendered parent tile.
 
-        if len(self._streamflow_slice_cache) >= MAX_SPARSE_VAR_SLICE_CACHE:
-            self._streamflow_slice_cache.pop(next(iter(self._streamflow_slice_cache)))
-        self._streamflow_slice_cache[cache_key] = prepared
-        return prepared
+        This preserves the parent raster exactly: no finite values are added
+        and no NaN cells are filled. It is the server-side equivalent of a
+        raster source's ``maxzoom`` behavior.
+        """
+        dz = int(requested_zoom) - int(parent_zoom)
+        if dz <= 0:
+            return parent_tile
+
+        factor = 2 ** dz
+        child_x = int(x) % factor
+        child_y = int(y) % factor
+        height, width = parent_tile.shape
+
+        # Map each output pixel to its nearest pixel in the appropriate child
+        # quadrant of the parent. This also works when factor exceeds 256.
+        x_idx = np.floor(
+            (child_x * width + np.arange(width, dtype=np.float64)) / factor
+        ).astype(np.int64)
+        y_idx = np.floor(
+            (child_y * height + np.arange(height, dtype=np.float64)) / factor
+        ).astype(np.int64)
+        x_idx = np.clip(x_idx, 0, width - 1)
+        y_idx = np.clip(y_idx, 0, height - 1)
+        return parent_tile[np.ix_(y_idx, x_idx)]
 
     @staticmethod
     def warn_if_level_query_present(level):
@@ -850,14 +802,24 @@ def get_tile(variable, time_input, category, z, x, y):
     src_lon = None
     tile_data = None
     try:
-        # Resolve nearest available zoom and load one 2D source slice
-        z_actual = tile_server.get_best_zoom(variable, z)
-        values_2d, src_lat, src_lon = tile_server.get_render_level_slice(
+        # Sparse Streamflow uses its first grain-1 level as a stable parent
+        # raster. Higher requests crop and upscale that parent below.
+        render_zoom = tile_server.get_render_zoom(variable, z)
+        dz = z - render_zoom
+        factor = 2 ** dz
+        render_x = x // factor
+        render_y = y // factor
+
+        # Resolve the pyramid data level used to render the parent tile.
+        z_actual = tile_server.get_best_zoom(variable, render_zoom)
+        values_2d, src_lat, src_lon = tile_server.get_level_slice(
             variable, z_actual, time_input, category, profile
         )
 
         # Get tile coordinate grids
-        grids = tile_server.get_tile_lonlat_grids(z, x, y, TILE_SIZE, mode=mode)
+        grids = tile_server.get_tile_lonlat_grids(
+            render_zoom, render_x, render_y, TILE_SIZE, mode=mode
+        )
 
         # If tile is outside data bounds (in global mode), return transparent tile
         if grids is None:
@@ -874,6 +836,9 @@ def get_tile(variable, time_input, category, z, x, y):
 
         # Resample source grid to tile grid with NumPy nearest neighbor
         tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
+        tile_data = tile_server.overzoom_parent_tile(
+            tile_data, z, render_zoom, x, y
+        )
 
         # Debug: Check NaN percentage
         nan_pct = np.isnan(tile_data).sum() / tile_data.size * 100
@@ -929,7 +894,7 @@ def get_tile(variable, time_input, category, z, x, y):
 
 
 @app.route('/pyramid/info/<variable>')
-def pyramid_info(variable):
+def pyramid_info(variable :  str):
     """Get pyramid information"""
     profile = request.args.get('profile', 0, type=int)
     level = request.args.get('level', type=int)
@@ -984,7 +949,7 @@ def pyramid_info(variable):
 
 
 @app.route('/pyramid/time/<variable>')
-def pyramid_time(variable):
+def pyramid_time(variable : str):
     """Get available time coordinates for a variable."""
     profile = request.args.get('profile', 0, type=int)
     level = request.args.get('level', type=int)
@@ -1072,7 +1037,6 @@ def save_test_tile(variable, time_input, category, z, x, y):
 def clear_cache():
     """Clear tile cache"""
     TILE_IMAGE_CACHE.clear()
-    tile_server._streamflow_slice_cache.clear()
     return jsonify({'message': 'Cache cleared'})
 
 
@@ -1084,7 +1048,6 @@ def health():
         'status': 'ok',
         'pyramids_loaded': len(tile_server.pyramids),
         'tiles_cached': len(TILE_IMAGE_CACHE),
-        'streamflow_slices_cached': len(tile_server._streamflow_slice_cache),
     })
 
 
