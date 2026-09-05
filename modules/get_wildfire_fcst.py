@@ -50,7 +50,11 @@ def build_fire_risk_soilm(
     soil_profile_index: int = 1,
 ) -> xr.DataArray:
     """Return risk where below-normal soil moisture exceeds the threshold."""
-    below_normal = _read_category(soil_fcst_file, soilmoist_var, category=0)
+    below_normal = _read_category(
+        soil_fcst_file, 
+        soilmoist_var, 
+        category=0
+    )
 
     profile_dim = next(
         (
@@ -94,12 +98,12 @@ def build_fire_risk_tp(
     rain_below = _read_category(
         probability_store(probability_dir, init_date, RAINF_VARIABLE),
         RAINF_VARIABLE,
-        category=0,
+        category=0, # for rainfall below normal means dry condition
     )
     temperature_above = _read_category(
         probability_store(probability_dir, init_date, TEMPERATURE_VARIABLE),
         TEMPERATURE_VARIABLE,
-        category=2,
+        category=2, # for air temp., above normal means dry condition
     )
     rain_below, temperature_above = xr.align(
         rain_below, temperature_above, join="exact"
