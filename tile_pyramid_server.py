@@ -3,13 +3,15 @@ Pyramid-based tile server for HydroViewer
 Optimized for Shiny + ipyleaflet integration
 """
 
+from __future__ import annotations
+
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
 from PIL import Image
 from io import BytesIO
 from urllib.parse import urljoin
 from pathlib import Path
-from scipy.ndimage import distance_transform_edt
+from collections.abc import Sequence, Mapping
 import json
 import os
 import hashlib
@@ -28,7 +30,7 @@ TILE_SIZE = 256
 BACKEND_DIR = os.getcwd()
 PYRAMID_DIR = os.path.join(BACKEND_DIR, 'get_ldas_probabilistic_output', 'subsampled')
 TILE_IMAGE_CACHE = {}  # Cache rendered tiles
-API_VERSION = "2026-02-08"
+API_VERSION = "2026-09-04-streamflow-native-grain"
 MAX_META_CACHE = 1
 MAX_TILE_CACHE = 50
 
@@ -67,7 +69,7 @@ class RegionalTileServer:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _open_npz_ref(self, ref):
+    def _open_npz_ref(self, ref) -> np.ndarray:
         if str(ref).startswith(("http://", "https://")):
             r = requests.get(ref, timeout=60)
             if r.status_code == 404:
@@ -88,6 +90,7 @@ class RegionalTileServer:
         except FileNotFoundError:
             self._index_cache = {}
         return self._index_cache
+
     
     def _stem(self, variable: str) -> str:
         cache_key = variable
@@ -126,6 +129,7 @@ class RegionalTileServer:
         raise FileNotFoundError(
             f"Could not resolve pyramid stem for variable '{variable}' in {PYRAMID_DIR}"
         )
+
     
     def _base_dir_url(self, variable: str) -> str:
         """
@@ -133,8 +137,9 @@ class RegionalTileServer:
         """
         stem = self._stem(variable)
         return self._join_ref(PYRAMID_DIR, stem)
+
     
-    def load_pyramid_meta(self, variable):
+    def load_pyramid_meta(self, variable : str):
         """Load pyramid metadata from remote."""
         cache_key = self._stem(variable)
         if cache_key in self.pyramids:
@@ -289,6 +294,26 @@ class RegionalTileServer:
             return requested_zoom
         return min(available, key=lambda k: abs(k - requested_zoom))
 
+    def get_data_zoom(self, variable: str, requested_zoom: int) -> int:
+        """Choose a pyramid level without capping the tile's map zoom.
+
+        Streamflow reaches native resolution when grain becomes 1.  Higher map
+        zooms can reuse that same data array, but must still be rendered using
+        the requested z/x/y bounds so the browser receives a detailed tile.
+        """
+        if "streamflow" not in variable.lower():
+            return int(requested_zoom)
+
+        meta = self.load_pyramid_meta(variable)
+        full_resolution_zooms = sorted(
+            int(z)
+            for z, grain in meta.get("grain_map", {}).items()
+            if int(grain) == 1
+        )
+        if not full_resolution_zooms:
+            return int(requested_zoom)
+        return min(int(requested_zoom), full_resolution_zooms[0])
+
     @staticmethod
     def warn_if_level_query_present(level):
         """Temporary backward compatibility path for deprecated `level` query param."""
@@ -427,7 +452,8 @@ class RegionalTileServer:
         nearest_rev = idx_rev - choose_left.astype(np.int64)
         return (coord.size - 1) - nearest_rev
 
-    def get_tile_data(self, values_2d, src_lon, src_lat, tile_lon, tile_lat, search_radius=1):
+
+    def get_tile_data(self, values_2d, src_lon, src_lat, tile_lon, tile_lat):
         """
         Sample a 2D source grid to the tile grid with nearest-neighbor lookup.
 
@@ -592,57 +618,6 @@ class RegionalTileServer:
 
         return img_p
     
-    # def thicken_sparse_features(self, tile_data, passes=1):
-    #     """
-    #     Expand sparse valid pixels into immediate neighbors.
-    #     Useful for line-like fields (e.g., streamflow) that can look like
-    #     they disappear at high zoom due to sub-pixel width.
-    #     """
-    #     data = np.asarray(tile_data, dtype=np.float32)
-    #     out = data.copy()
-
-    #     for _ in range(max(1, int(passes))):
-    #         base = out.copy()
-    #         nan_mask = np.isnan(out)
-    #         if not np.any(nan_mask):
-    #             break
-
-    #         for dy in (-1, 0, 1):
-    #             for dx in (-1, 0, 1):
-    #                 if dy == 0 and dx == 0:
-    #                     continue
-
-    #                 dst_y0 = max(0, dy)
-    #                 dst_y1 = min(out.shape[0], out.shape[0] + dy)
-    #                 dst_x0 = max(0, dx)
-    #                 dst_x1 = min(out.shape[1], out.shape[1] + dx)
-
-    #                 src_y0 = max(0, -dy)
-    #                 src_y1 = min(base.shape[0], base.shape[0] - dy)
-    #                 src_x0 = max(0, -dx)
-    #                 src_x1 = min(base.shape[1], base.shape[1] - dx)
-
-    #                 src = base[src_y0:src_y1, src_x0:src_x1]
-    #                 dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
-    #                 dst_nan = np.isnan(dst)
-    #                 src_valid = np.isfinite(src)
-    #                 fill = dst_nan & src_valid
-    #                 if np.any(fill):
-    #                     dst[fill] = src[fill]
-
-    #         return out
-
-# def fill_nan_with_nearest_valid(values_2d):
-#     valid = np.isfinite(values_2d)
-
-#     if not np.any(valid):
-#         return values_2d.copy(), np.full(values_2d.shape, np.inf, dtype=np.float32)
-
-#     # indices of nearest valid cell for every location
-#     dist, inds = distance_transform_edt(~valid, return_indices=True)
-
-#     filled = values_2d[inds[0], inds[1]]
-#     return filled.astype(np.float32, copy=False), dist.astype(np.float32, copy=False)
 
     def rasterize_sparse_cells_to_tile(self, values_2d, src_lon, src_lat, tile_lon, tile_lat):
         """
@@ -709,45 +684,47 @@ class RegionalTileServer:
                 out[yp, xp] = v
 
         return out
-    def thicken_sparse_features(self, tile_data, passes=1):
-        """
-        Expand sparse valid pixels into immediate neighbors.
-        Useful for line-like fields (e.g., streamflow) that can look like
-        they disappear at high zoom due to sub-pixel width.
-        """
-        data = np.asarray(tile_data, dtype=np.float32)
-        out = data.copy()
 
-        for _ in range(max(1, int(passes))):
-            base = out.copy()
-            nan_mask = np.isnan(out)
-            if not np.any(nan_mask):
-                break
+    # Thicken Sparse Features Will Be removed in a future version    
+    # def thicken_sparse_features(self, tile_data, passes=1):
+    #     """
+    #     Expand sparse valid pixels into immediate neighbors.
+    #     Useful for line-like fields (e.g., streamflow) that can look like
+    #     they disappear at high zoom due to sub-pixel width.
+    #     """
+    #     data = np.asarray(tile_data, dtype=np.float32)
+    #     out = data.copy()
 
-            for dy in (-1, 0, 1):
-                for dx in (-1, 0, 1):
-                    if dy == 0 and dx == 0:
-                        continue
+    #     for _ in range(max(1, int(passes))):
+    #         base = out.copy()
+    #         nan_mask = np.isnan(out)
+    #         if not np.any(nan_mask):
+    #             break
 
-                    dst_y0 = max(0, dy)
-                    dst_y1 = min(out.shape[0], out.shape[0] + dy)
-                    dst_x0 = max(0, dx)
-                    dst_x1 = min(out.shape[1], out.shape[1] + dx)
+    #         for dy in (-1, 0, 1):
+    #             for dx in (-1, 0, 1):
+    #                 if dy == 0 and dx == 0:
+    #                     continue
 
-                    src_y0 = max(0, -dy)
-                    src_y1 = min(base.shape[0], base.shape[0] - dy)
-                    src_x0 = max(0, -dx)
-                    src_x1 = min(base.shape[1], base.shape[1] - dx)
+    #                 dst_y0 = max(0, dy)
+    #                 dst_y1 = min(out.shape[0], out.shape[0] + dy)
+    #                 dst_x0 = max(0, dx)
+    #                 dst_x1 = min(out.shape[1], out.shape[1] + dx)
 
-                    src = base[src_y0:src_y1, src_x0:src_x1]
-                    dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
-                    dst_nan = np.isnan(dst)
-                    src_valid = np.isfinite(src)
-                    fill = dst_nan & src_valid
-                    if np.any(fill):
-                        dst[fill] = src[fill]
+    #                 src_y0 = max(0, -dy)
+    #                 src_y1 = min(base.shape[0], base.shape[0] - dy)
+    #                 src_x0 = max(0, -dx)
+    #                 src_x1 = min(base.shape[1], base.shape[1] - dx)
 
-        return out
+    #                 src = base[src_y0:src_y1, src_x0:src_x1]
+    #                 dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
+    #                 dst_nan = np.isnan(dst)
+    #                 src_valid = np.isfinite(src)
+    #                 fill = dst_nan & src_valid
+    #                 if np.any(fill):
+    #                     dst[fill] = src[fill]
+
+    #     return out
 
 # Global server instance
 tile_server = RegionalTileServer()
@@ -801,29 +778,19 @@ def get_tile(variable, time_input, category, z, x, y):
     src_lon = None
     tile_data = None
     try:
-        # Resolve nearest available zoom and load one 2D source slice
-        z_actual = tile_server.get_best_zoom(variable, z)
+        # Streamflow may reuse its first grain-1 data array at higher zooms.
+        # Tile geometry still uses the requested z/x/y; otherwise a rendered
+        # z5 PNG would merely be enlarged and appear increasingly coarse.
+        data_zoom = tile_server.get_data_zoom(variable, z)
+        z_actual = tile_server.get_best_zoom(variable, data_zoom)
         values_2d, src_lat, src_lon = tile_server.get_level_slice(
             variable, z_actual, time_input, category, profile
         )
-        meta = tile_server.load_pyramid_meta(variable)
-        grain = int(meta.get("grain_map", {}).get(str(z_actual), 1))
-        
-        # If request overzooms beyond available data, sample from the parent tile
-        # at z_actual so features stay visible instead of collapsing to NaN.
-        # if z > z_actual:
-        #     dz = z - z_actual
-        #     factor = 2 ** dz
-        #     x_sample = x // factor
-        #     y_sample = y // factor
-        #     z_sample = z_actual
-        # else:
-        #     x_sample = x
-        #     y_sample = y
-        #     z_sample = z
 
         # Get tile coordinate grids
-        grids = tile_server.get_tile_lonlat_grids(z, x, y, TILE_SIZE, mode=mode)
+        grids = tile_server.get_tile_lonlat_grids(
+            z, x, y, TILE_SIZE, mode=mode
+        )
 
         # If tile is outside data bounds (in global mode), return transparent tile
         if grids is None:
@@ -840,15 +807,6 @@ def get_tile(variable, time_input, category, z, x, y):
 
         # Resample source grid to tile grid with NumPy nearest neighbor
         tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
-        is_streamflow = "streamflow" in variable.lower()
-        if is_streamflow and grain == 1:
-            #tile_data = tile_server.rasterize_sparse_cells_to_tile(values_2d, src_lon, src_lat, lon, lat)
-            tile_data = tile_server.thicken_sparse_features(tile_data, passes=1)
-        #else:
-            #tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
-
-        # if 'streamflow'in variable.lower():
-        #     tile_data = tile_server.thicken_sparse_features(tile_data, passes=1)
 
         # Debug: Check NaN percentage
         nan_pct = np.isnan(tile_data).sum() / tile_data.size * 100
@@ -904,7 +862,7 @@ def get_tile(variable, time_input, category, z, x, y):
 
 
 @app.route('/pyramid/info/<variable>')
-def pyramid_info(variable):
+def pyramid_info(variable :  str):
     """Get pyramid information"""
     profile = request.args.get('profile', 0, type=int)
     level = request.args.get('level', type=int)
@@ -959,7 +917,7 @@ def pyramid_info(variable):
 
 
 @app.route('/pyramid/time/<variable>')
-def pyramid_time(variable):
+def pyramid_time(variable : str):
     """Get available time coordinates for a variable."""
     profile = request.args.get('profile', 0, type=int)
     level = request.args.get('level', type=int)
@@ -1057,7 +1015,7 @@ def health():
         'api_version': API_VERSION,
         'status': 'ok',
         'pyramids_loaded': len(tile_server.pyramids),
-        'tiles_cached': len(TILE_IMAGE_CACHE)
+        'tiles_cached': len(TILE_IMAGE_CACHE),
     })
 
 

@@ -48,7 +48,9 @@ def get_thresh(icat : int,
 
 def calculate_probabilities(hcst : xr.DataArray,
                             fcst : xr.DataArray,
-                            quantiles : list[float, float] =[ 1/3., 2/3.]) -> xr.DataArray:
+                            quantiles : Sequence[float] = (1/3., 2/3.),
+                            *,
+                            mask_zeros: bool = True) -> xr.DataArray:
     """
     Calculate tercile category probability exceedance for ensemble forecast.
     
@@ -71,9 +73,9 @@ def calculate_probabilities(hcst : xr.DataArray,
     print('\n Computing probabilities...')
     numcategories = len(quantiles) + 1  # 3 categories for terciles
 
-    # Mask out 0 values in forecast (assumes 0 = missing/invalid)
-    # NOTE: Verify this is appropriate for your data
-    fcst_masked = fcst.where(fcst != 0)
+    # Some legacy products encode missing cells as zero. Real zero precipitation,
+    # however, is meaningful for wildfire risk, so callers can retain zeros.
+    fcst_masked = fcst.where(fcst != 0) if mask_zeros else fcst
 
     # Rechunk once for the quantile operation and compute all quantile edges once.
     q_dims = [d for d in ['ensemble', 'time'] if d in hcst.dims]
@@ -116,7 +118,9 @@ def mainloop(
         fcst_file : Path,
         prob_fcst_cache_dir : Path,
         init_date : str,
-        river_mask_file : Path
+        river_mask_file : Path | None,
+        *,
+        mask_zeros: bool = True,
 ) -> None:
     import gc
     from tqdm import tqdm
@@ -138,7 +142,11 @@ def mainloop(
 
             # Calculate probabilities (convert to percentages)
             print("Calculating tercile probabilities...")
-            probs = calculate_probabilities(hcst, fcst) * 100
+            probs = calculate_probabilities(
+                hcst,
+                fcst,
+                mask_zeros=mask_zeros,
+            ) * 100
             print(f"\n Probability data shape: {probs.shape}")
             print(f"Dimensions: {probs.dims} Categories: {probs.category.values}")
             #print(f"Time steps: {len(probs.time)}")
