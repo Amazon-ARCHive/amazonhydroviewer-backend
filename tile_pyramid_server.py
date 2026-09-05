@@ -30,7 +30,7 @@ TILE_SIZE = 256
 BACKEND_DIR = os.getcwd()
 PYRAMID_DIR = os.path.join(BACKEND_DIR, 'get_ldas_probabilistic_output', 'subsampled')
 TILE_IMAGE_CACHE = {}  # Cache rendered tiles
-API_VERSION = "2026-09-04-streamflow-overzoom"
+API_VERSION = "2026-09-04-streamflow-native-grain"
 MAX_META_CACHE = 1
 MAX_TILE_CACHE = 50
 
@@ -294,8 +294,13 @@ class RegionalTileServer:
             return requested_zoom
         return min(available, key=lambda k: abs(k - requested_zoom))
 
-    def get_render_zoom(self, variable: str, requested_zoom: int) -> int:
-        """Cap sparse Streamflow rendering at its first full-resolution level."""
+    def get_data_zoom(self, variable: str, requested_zoom: int) -> int:
+        """Choose a pyramid level without capping the tile's map zoom.
+
+        Streamflow reaches native resolution when grain becomes 1.  Higher map
+        zooms can reuse that same data array, but must still be rendered using
+        the requested z/x/y bounds so the browser receives a detailed tile.
+        """
         if "streamflow" not in variable.lower():
             return int(requested_zoom)
 
@@ -308,35 +313,6 @@ class RegionalTileServer:
         if not full_resolution_zooms:
             return int(requested_zoom)
         return min(int(requested_zoom), full_resolution_zooms[0])
-
-    @staticmethod
-    def overzoom_parent_tile(parent_tile, requested_zoom, parent_zoom, x, y):
-        """Crop and upscale the requested child of a rendered parent tile.
-
-        This preserves the parent raster exactly: no finite values are added
-        and no NaN cells are filled. It is the server-side equivalent of a
-        raster source's ``maxzoom`` behavior.
-        """
-        dz = int(requested_zoom) - int(parent_zoom)
-        if dz <= 0:
-            return parent_tile
-
-        factor = 2 ** dz
-        child_x = int(x) % factor
-        child_y = int(y) % factor
-        height, width = parent_tile.shape
-
-        # Map each output pixel to its nearest pixel in the appropriate child
-        # quadrant of the parent. This also works when factor exceeds 256.
-        x_idx = np.floor(
-            (child_x * width + np.arange(width, dtype=np.float64)) / factor
-        ).astype(np.int64)
-        y_idx = np.floor(
-            (child_y * height + np.arange(height, dtype=np.float64)) / factor
-        ).astype(np.int64)
-        x_idx = np.clip(x_idx, 0, width - 1)
-        y_idx = np.clip(y_idx, 0, height - 1)
-        return parent_tile[np.ix_(y_idx, x_idx)]
 
     @staticmethod
     def warn_if_level_query_present(level):
@@ -802,23 +778,18 @@ def get_tile(variable, time_input, category, z, x, y):
     src_lon = None
     tile_data = None
     try:
-        # Sparse Streamflow uses its first grain-1 level as a stable parent
-        # raster. Higher requests crop and upscale that parent below.
-        render_zoom = tile_server.get_render_zoom(variable, z)
-        dz = z - render_zoom
-        factor = 2 ** dz
-        render_x = x // factor
-        render_y = y // factor
-
-        # Resolve the pyramid data level used to render the parent tile.
-        z_actual = tile_server.get_best_zoom(variable, render_zoom)
+        # Streamflow may reuse its first grain-1 data array at higher zooms.
+        # Tile geometry still uses the requested z/x/y; otherwise a rendered
+        # z5 PNG would merely be enlarged and appear increasingly coarse.
+        data_zoom = tile_server.get_data_zoom(variable, z)
+        z_actual = tile_server.get_best_zoom(variable, data_zoom)
         values_2d, src_lat, src_lon = tile_server.get_level_slice(
             variable, z_actual, time_input, category, profile
         )
 
         # Get tile coordinate grids
         grids = tile_server.get_tile_lonlat_grids(
-            render_zoom, render_x, render_y, TILE_SIZE, mode=mode
+            z, x, y, TILE_SIZE, mode=mode
         )
 
         # If tile is outside data bounds (in global mode), return transparent tile
@@ -836,9 +807,6 @@ def get_tile(variable, time_input, category, z, x, y):
 
         # Resample source grid to tile grid with NumPy nearest neighbor
         tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
-        tile_data = tile_server.overzoom_parent_tile(
-            tile_data, z, render_zoom, x, y
-        )
 
         # Debug: Check NaN percentage
         nan_pct = np.isnan(tile_data).sum() / tile_data.size * 100
