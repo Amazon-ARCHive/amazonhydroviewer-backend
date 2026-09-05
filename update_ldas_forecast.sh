@@ -6,6 +6,7 @@ source /home/local/WIN/qsu4/miniconda3/etc/profile.d/conda.sh
 conda activate analytics
 
 current_date_time="$(date +%Y-%m-%d)"
+push_result=True # <<< change to False if you don't want the results to be staged
 
 mkdir -p logs
 
@@ -13,9 +14,12 @@ nohup python updater.py \
     --surface-model-dir /mnt/vast/prakrut/backup/lis_runs/malaria_amazon/forecast/monthly \
     --hcst-start-year 2001 \
     --hcst-end-year 2020 \
+    --fcst-init-date 2022 08 \
+    --push-result ${push_result}\
     > ./logs/forecast_update_ver_${current_date_time}.log 2>&1 
 
 # push new data to github data repo
-git push
+if $push_result:
+    git push
 
 echo "Finished Processing"
