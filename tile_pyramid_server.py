@@ -9,7 +9,6 @@ from PIL import Image
 from io import BytesIO
 from urllib.parse import urljoin
 from pathlib import Path
-from scipy.ndimage import distance_transform_edt
 import json
 import os
 import hashlib
@@ -31,6 +30,8 @@ TILE_IMAGE_CACHE = {}  # Cache rendered tiles
 API_VERSION = "2026-02-08"
 MAX_META_CACHE = 1
 MAX_TILE_CACHE = 50
+MAX_SPARSE_VAR_SLICE_CACHE = 4
+SPARSE_VAR_SOURCE_RADIUS = 1.5
 
 class RegionalTileServer:
     """Serves tiles from pyramids using regional coordinates"""
@@ -42,6 +43,7 @@ class RegionalTileServer:
         self.data_bounds = None
         self._index_cache = None
         self._stem_cache = {}
+        self._streamflow_slice_cache = {}
 
     def _is_remote(self):
         return str(PYRAMID_DIR).startswith(("http://", "https://"))
@@ -290,6 +292,101 @@ class RegionalTileServer:
         return min(available, key=lambda k: abs(k - requested_zoom))
 
     @staticmethod
+    def expand_sparse_source(values_2d, radius=SPARSE_VAR_SOURCE_RADIUS):
+        """Expand finite cells into nearby source-grid cells before sampling.
+
+        Streamflow is stored as a sparse raster. Giving each river cell a
+        stable source-grid footprint prevents it from disappearing when a tile
+        happens to sample only neighboring NaN cells.
+        """
+        data = np.asarray(values_2d, dtype=np.float32)
+        if data.ndim != 2:
+            raise ValueError(f"values_2d must be 2D, got shape {data.shape}")
+        if radius <= 0 or not np.any(np.isfinite(data)):
+            return data.copy()
+
+        out = data.copy()
+        height, width = data.shape
+        max_offset = int(np.ceil(radius))
+        radius_sq = float(radius) ** 2
+        offsets = sorted(
+            (dy * dy + dx * dx, dy, dx)
+            for dy in range(-max_offset, max_offset + 1)
+            for dx in range(-max_offset, max_offset + 1)
+            if (dy != 0 or dx != 0) and dy * dy + dx * dx <= radius_sq
+        )
+
+        # Copy only from the original data so newly filled cells cannot spread
+        # farther than the requested source-grid radius.
+        for _, dy, dx in offsets:
+            if dy >= 0:
+                src_y = slice(0, height - dy)
+                dst_y = slice(dy, height)
+            else:
+                src_y = slice(-dy, height)
+                dst_y = slice(0, height + dy)
+
+            if dx >= 0:
+                src_x = slice(0, width - dx)
+                dst_x = slice(dx, width)
+            else:
+                src_x = slice(-dx, width)
+                dst_x = slice(0, width + dx)
+
+            source = data[src_y, src_x]
+            destination = out[dst_y, dst_x]
+            fill = ~np.isfinite(destination) & np.isfinite(source)
+            destination[fill] = source[fill]
+
+        return out
+
+    def get_render_level_slice(
+        self,
+        variable: str,
+        z: int,
+        time_input,
+        category_idx: int,
+        profile_idx: int = 0,
+    ):
+        """Load and prepare one source slice for tile rendering."""
+        meta = self.load_pyramid_meta(variable)
+        grain = int(meta.get("grain_map", {}).get(str(int(z)), 1))
+        is_streamflow = "streamflow" in variable.lower()
+
+        if not is_streamflow or grain != 1:
+            return self.get_level_slice(
+                variable, z, time_input, category_idx, profile_idx
+            )
+
+        cache_key = (
+            self._stem(variable),
+            int(z),
+            str(time_input),
+            int(category_idx),
+            int(profile_idx),
+            float(SPARSE_VAR_SOURCE_RADIUS),
+        )
+        cached = self._streamflow_slice_cache.pop(cache_key, None)
+        if cached is not None:
+            # Reinsert so eviction behaves as a small least-recently-used cache.
+            self._streamflow_slice_cache[cache_key] = cached
+            return cached
+
+        values_2d, lat, lon = self.get_level_slice(
+            variable, z, time_input, category_idx, profile_idx
+        )
+        prepared = (
+            self.expand_sparse_source(values_2d),
+            np.asarray(lat),
+            np.asarray(lon),
+        )
+
+        if len(self._streamflow_slice_cache) >= MAX_SPARSE_VAR_SLICE_CACHE:
+            self._streamflow_slice_cache.pop(next(iter(self._streamflow_slice_cache)))
+        self._streamflow_slice_cache[cache_key] = prepared
+        return prepared
+
+    @staticmethod
     def warn_if_level_query_present(level):
         """Temporary backward compatibility path for deprecated `level` query param."""
         if level is not None:
@@ -427,7 +524,8 @@ class RegionalTileServer:
         nearest_rev = idx_rev - choose_left.astype(np.int64)
         return (coord.size - 1) - nearest_rev
 
-    def get_tile_data(self, values_2d, src_lon, src_lat, tile_lon, tile_lat, search_radius=1):
+
+    def get_tile_data(self, values_2d, src_lon, src_lat, tile_lon, tile_lat):
         """
         Sample a 2D source grid to the tile grid with nearest-neighbor lookup.
 
@@ -592,57 +690,6 @@ class RegionalTileServer:
 
         return img_p
     
-    # def thicken_sparse_features(self, tile_data, passes=1):
-    #     """
-    #     Expand sparse valid pixels into immediate neighbors.
-    #     Useful for line-like fields (e.g., streamflow) that can look like
-    #     they disappear at high zoom due to sub-pixel width.
-    #     """
-    #     data = np.asarray(tile_data, dtype=np.float32)
-    #     out = data.copy()
-
-    #     for _ in range(max(1, int(passes))):
-    #         base = out.copy()
-    #         nan_mask = np.isnan(out)
-    #         if not np.any(nan_mask):
-    #             break
-
-    #         for dy in (-1, 0, 1):
-    #             for dx in (-1, 0, 1):
-    #                 if dy == 0 and dx == 0:
-    #                     continue
-
-    #                 dst_y0 = max(0, dy)
-    #                 dst_y1 = min(out.shape[0], out.shape[0] + dy)
-    #                 dst_x0 = max(0, dx)
-    #                 dst_x1 = min(out.shape[1], out.shape[1] + dx)
-
-    #                 src_y0 = max(0, -dy)
-    #                 src_y1 = min(base.shape[0], base.shape[0] - dy)
-    #                 src_x0 = max(0, -dx)
-    #                 src_x1 = min(base.shape[1], base.shape[1] - dx)
-
-    #                 src = base[src_y0:src_y1, src_x0:src_x1]
-    #                 dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
-    #                 dst_nan = np.isnan(dst)
-    #                 src_valid = np.isfinite(src)
-    #                 fill = dst_nan & src_valid
-    #                 if np.any(fill):
-    #                     dst[fill] = src[fill]
-
-    #         return out
-
-# def fill_nan_with_nearest_valid(values_2d):
-#     valid = np.isfinite(values_2d)
-
-#     if not np.any(valid):
-#         return values_2d.copy(), np.full(values_2d.shape, np.inf, dtype=np.float32)
-
-#     # indices of nearest valid cell for every location
-#     dist, inds = distance_transform_edt(~valid, return_indices=True)
-
-#     filled = values_2d[inds[0], inds[1]]
-#     return filled.astype(np.float32, copy=False), dist.astype(np.float32, copy=False)
 
     def rasterize_sparse_cells_to_tile(self, values_2d, src_lon, src_lat, tile_lon, tile_lat):
         """
@@ -709,45 +756,47 @@ class RegionalTileServer:
                 out[yp, xp] = v
 
         return out
-    def thicken_sparse_features(self, tile_data, passes=1):
-        """
-        Expand sparse valid pixels into immediate neighbors.
-        Useful for line-like fields (e.g., streamflow) that can look like
-        they disappear at high zoom due to sub-pixel width.
-        """
-        data = np.asarray(tile_data, dtype=np.float32)
-        out = data.copy()
 
-        for _ in range(max(1, int(passes))):
-            base = out.copy()
-            nan_mask = np.isnan(out)
-            if not np.any(nan_mask):
-                break
+    # Thicken Sparse Features Will Be removed in a future version    
+    # def thicken_sparse_features(self, tile_data, passes=1):
+    #     """
+    #     Expand sparse valid pixels into immediate neighbors.
+    #     Useful for line-like fields (e.g., streamflow) that can look like
+    #     they disappear at high zoom due to sub-pixel width.
+    #     """
+    #     data = np.asarray(tile_data, dtype=np.float32)
+    #     out = data.copy()
 
-            for dy in (-1, 0, 1):
-                for dx in (-1, 0, 1):
-                    if dy == 0 and dx == 0:
-                        continue
+    #     for _ in range(max(1, int(passes))):
+    #         base = out.copy()
+    #         nan_mask = np.isnan(out)
+    #         if not np.any(nan_mask):
+    #             break
 
-                    dst_y0 = max(0, dy)
-                    dst_y1 = min(out.shape[0], out.shape[0] + dy)
-                    dst_x0 = max(0, dx)
-                    dst_x1 = min(out.shape[1], out.shape[1] + dx)
+    #         for dy in (-1, 0, 1):
+    #             for dx in (-1, 0, 1):
+    #                 if dy == 0 and dx == 0:
+    #                     continue
 
-                    src_y0 = max(0, -dy)
-                    src_y1 = min(base.shape[0], base.shape[0] - dy)
-                    src_x0 = max(0, -dx)
-                    src_x1 = min(base.shape[1], base.shape[1] - dx)
+    #                 dst_y0 = max(0, dy)
+    #                 dst_y1 = min(out.shape[0], out.shape[0] + dy)
+    #                 dst_x0 = max(0, dx)
+    #                 dst_x1 = min(out.shape[1], out.shape[1] + dx)
 
-                    src = base[src_y0:src_y1, src_x0:src_x1]
-                    dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
-                    dst_nan = np.isnan(dst)
-                    src_valid = np.isfinite(src)
-                    fill = dst_nan & src_valid
-                    if np.any(fill):
-                        dst[fill] = src[fill]
+    #                 src_y0 = max(0, -dy)
+    #                 src_y1 = min(base.shape[0], base.shape[0] - dy)
+    #                 src_x0 = max(0, -dx)
+    #                 src_x1 = min(base.shape[1], base.shape[1] - dx)
 
-        return out
+    #                 src = base[src_y0:src_y1, src_x0:src_x1]
+    #                 dst = out[dst_y0:dst_y1, dst_x0:dst_x1]
+    #                 dst_nan = np.isnan(dst)
+    #                 src_valid = np.isfinite(src)
+    #                 fill = dst_nan & src_valid
+    #                 if np.any(fill):
+    #                     dst[fill] = src[fill]
+
+    #     return out
 
 # Global server instance
 tile_server = RegionalTileServer()
@@ -803,24 +852,9 @@ def get_tile(variable, time_input, category, z, x, y):
     try:
         # Resolve nearest available zoom and load one 2D source slice
         z_actual = tile_server.get_best_zoom(variable, z)
-        values_2d, src_lat, src_lon = tile_server.get_level_slice(
+        values_2d, src_lat, src_lon = tile_server.get_render_level_slice(
             variable, z_actual, time_input, category, profile
         )
-        meta = tile_server.load_pyramid_meta(variable)
-        grain = int(meta.get("grain_map", {}).get(str(z_actual), 1))
-        
-        # If request overzooms beyond available data, sample from the parent tile
-        # at z_actual so features stay visible instead of collapsing to NaN.
-        # if z > z_actual:
-        #     dz = z - z_actual
-        #     factor = 2 ** dz
-        #     x_sample = x // factor
-        #     y_sample = y // factor
-        #     z_sample = z_actual
-        # else:
-        #     x_sample = x
-        #     y_sample = y
-        #     z_sample = z
 
         # Get tile coordinate grids
         grids = tile_server.get_tile_lonlat_grids(z, x, y, TILE_SIZE, mode=mode)
@@ -840,15 +874,6 @@ def get_tile(variable, time_input, category, z, x, y):
 
         # Resample source grid to tile grid with NumPy nearest neighbor
         tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
-        is_streamflow = "streamflow" in variable.lower()
-        if is_streamflow and grain == 1:
-            #tile_data = tile_server.rasterize_sparse_cells_to_tile(values_2d, src_lon, src_lat, lon, lat)
-            tile_data = tile_server.thicken_sparse_features(tile_data, passes=1)
-        #else:
-            #tile_data = tile_server.get_tile_data(values_2d, src_lon, src_lat, lon, lat)
-
-        # if 'streamflow'in variable.lower():
-        #     tile_data = tile_server.thicken_sparse_features(tile_data, passes=1)
 
         # Debug: Check NaN percentage
         nan_pct = np.isnan(tile_data).sum() / tile_data.size * 100
@@ -1047,6 +1072,7 @@ def save_test_tile(variable, time_input, category, z, x, y):
 def clear_cache():
     """Clear tile cache"""
     TILE_IMAGE_CACHE.clear()
+    tile_server._streamflow_slice_cache.clear()
     return jsonify({'message': 'Cache cleared'})
 
 
@@ -1057,7 +1083,8 @@ def health():
         'api_version': API_VERSION,
         'status': 'ok',
         'pyramids_loaded': len(tile_server.pyramids),
-        'tiles_cached': len(TILE_IMAGE_CACHE)
+        'tiles_cached': len(TILE_IMAGE_CACHE),
+        'streamflow_slices_cached': len(tile_server._streamflow_slice_cache),
     })
 
 
