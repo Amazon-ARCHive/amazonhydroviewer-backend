@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run leave-one-year-out probabilistic wildfire-risk backtests.
+"""Prepare probabilistic wildfire-risk backtests.
 
 For each selected initialization, the matching LDAS file is treated as the
 forecast. Files from the same calendar month in every other year of the
@@ -47,7 +47,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         nargs=2,
         type=int,
         metavar=("YEAR", "MONTH"),
-        help="Run one leave-one-year-out initialization.",
+        help="Run one fixed climatology initialization.",
     )
     target.add_argument(
         "--month",
@@ -120,9 +120,9 @@ def _select_targets(
             requested = datetime(*args.fcst_init_date, 1)
         except ValueError as exc:
             raise SystemExit(f"Invalid forecast initialization month: {exc}") from exc
-        if not start_year <= requested.year <= end_year:
+        if requested.year <= end_year:
             raise SystemExit(
-                "Leave-one-year-out target must be inside the hindcast period "
+                f"Target year must be after the climatology period {start_year}-{end_year}"
                 f"{start_year}-{end_year}."
             )
         matches = [
@@ -134,7 +134,7 @@ def _select_targets(
         matches = [
             (date, path)
             for date, path in files.items()
-            if start_year <= date.year <= end_year
+            if date.year > end_year
             and date.month == args.month
             and date.day == 1
         ]
@@ -165,10 +165,10 @@ def _reference_files(
         and date.year != target_date.year
     ]
     references.sort(key=lambda path: utils._parse_date_from_name(path.name))
-    expected = end_year - start_year
+    expected = end_year - start_year + 1
     if len(references) != expected:
         raise FileNotFoundError(
-            f"Expected {expected} leave-one-year-out references for "
+            f"Expected {expected} reference files for "
             f"{target_date:%Y-%m}, but found {len(references)}. Check that every "
             f"year from {start_year} through {end_year} has this initialization."
         )
@@ -241,7 +241,7 @@ def run_initialization(
     expected = args.hcst_end_year - args.hcst_start_year
     print(f"\n{'=' * 72}")
     print(f"Target initialization: {target_date:%Y-%m-%d} ({target_file.name})")
-    print(f"LOYO reference files: {len(references)} (expected {expected})")
+    print(f"Reference files: {len(references)} (expected {expected})")
     print(f"Output directory: {result_dir}")
 
     selected_variables = {name: VARIABLES[name] for name in args.variables}
@@ -263,7 +263,7 @@ def run_initialization(
         "forecast_file": str(target_file.resolve()),
         "reference_files": [str(path.resolve()) for path in references],
         "reference_count": len(references),
-        "cross_validation": "leave-one-year-out",
+        "cross_validation": "2001-2020 fixed period climatology",
         "variables": args.variables,
         "fire_risk_method": args.fire_risk_method,
         "minimum_probability_percent": args.minimum_probability,
@@ -282,7 +282,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     for target_date, target_file in targets:
         run_initialization(args, files, target_date, target_file)
 
-    print(f"\nCompleted {len(targets)} leave-one-year-out initialization(s).")
+    print(f"\nCompleted {len(targets)} initialization(s).")
 
 
 if __name__ == "__main__":
