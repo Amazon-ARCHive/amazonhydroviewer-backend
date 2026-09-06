@@ -238,10 +238,13 @@ def run_initialization(
     probability_dir = result_dir / "probabilities"
     probability_dir.mkdir(parents=True, exist_ok=True)
 
-    expected = args.hcst_end_year - args.hcst_start_year
     print(f"\n{'=' * 72}")
     print(f"Target initialization: {target_date:%Y-%m-%d} ({target_file.name})")
-    print(f"Reference files: {len(references)} (expected {expected})")
+    print(
+        f"Reference files: {len(references)} "
+        f"(fixed climatology "
+        f"{args.hcst_start_year}-{args.hcst_end_year}"
+    )
     print(f"Output directory: {result_dir}")
 
     selected_variables = {name: VARIABLES[name] for name in args.variables}
