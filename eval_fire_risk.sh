@@ -11,6 +11,7 @@ conda activate analytics
 run_timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
 mkdir -p logs
 
+# DEFAULT HINDCAST RANGE 2001-2020
 nohup python ./init_firerisk.py \
     --surface-model-dir /mnt/vast/prakrut/backup/lis_runs/malaria_amazon/forecast/monthly \
     --hcst-start-year 2001 \
