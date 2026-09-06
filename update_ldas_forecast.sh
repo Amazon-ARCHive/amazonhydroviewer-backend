@@ -14,7 +14,6 @@ nohup python updater.py \
     --hcst-start-year 2001 \
     --hcst-end-year 2020 \
     --fcst-init-date 2022 08 \
-    --push-results ${push_result}\
     > ./logs/forecast_update_ver_${current_date_time}.log 2>&1 
 
 # push new data to github data repo
